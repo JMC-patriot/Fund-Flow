@@ -223,7 +223,8 @@ document.addEventListener("mousemove", e => {
 function stackedBars(periods, types, val, {W = 720, H = 260, fmt = won, labelEvery} = {}) {
   if (!periods.length) return '<p class="na">데이터 없음</p>';
   const tot = periods.map(p => types.reduce((a, t) => a + (val(p, t) || 0), 0));
-  const max = Math.max(...tot) || 1, pb = 24, pt = 20, pl = 4;
+  if (!Math.max(...tot)) return '<p class="na">데이터 없음 (수집 중이면 잠시 후 다시 확인하세요)</p>';
+  const max = Math.max(...tot), pb = 24, pt = 20, pl = 4;
   const step = (W - pl) / periods.length, bw = Math.max(3, step * 0.66), y = v => v / max * (H - pb - pt);
   const every = labelEvery || Math.ceil(periods.length / 14);
   let g = `<line x1="0" x2="${W}" y1="${H - pb}" y2="${H - pb}" stroke="var(--line)"/>`;

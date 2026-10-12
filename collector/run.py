@@ -110,7 +110,7 @@ class Store:
 
 
 # ── 1) 공시 목록 스캔 ─────────────────────────────────────────────────
-def scan_lists(dart, db, since: date):
+def scan_lists(dart, db, since: date, types=("B", "C", "A")):
     today = date.today()
     cutoff = today - timedelta(days=RECENT_DAYS)
     windows, s = [], since
@@ -120,7 +120,7 @@ def scan_lists(dart, db, since: date):
         s = e + timedelta(days=1)
     windows.append((cutoff + timedelta(days=1), today, False))   # 최근 구간: 매번
 
-    for ty in ("B", "C", "A"):
+    for ty in types:
         for s, e, final in windows:
             task = f"list:{ty}:{s:%Y%m%d}:{e:%Y%m%d}"
             if final and db.done(task):
@@ -316,10 +316,15 @@ def main():
     db = Store(os.environ["DATABASE_URL"].strip())
     since = date.fromisoformat(a.since)
     try:
-        scan_lists(dart, db, since)
+        # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)
+        scan_lists(dart, db, since, ("B",))
         fetch_decisions(dart, db)
-        fetch_registrations(dart, db)
+        db.q(DEDUPE_SQL)
         detect_rcps(dart, db)
+        scan_lists(dart, db, since, ("C",))
+        fetch_registrations(dart, db)
+        db.q(DEDUPE_SQL)
+        scan_lists(dart, db, since, ("A",))
         half = dart.left // 2
         fetch_periodic(dart, db, half)
         fetch_financials(dart, db, dart.left)

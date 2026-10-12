@@ -269,6 +269,8 @@ async function viewMacro(el) {
     const b = e.target.closest("[data-bucket]");
     if (b) { Object.assign(MO, {status: "outstanding", types: DEBT.filter(x => M.types.includes(x)).join(",") || DEBT.join(","), ...BUCKET_RANGE(b.dataset.bucket), page: 0}); location.hash = "#/monitor"; }
   };
+  const waking = '<p class="na">불러오는 중… (서버가 잠들어 있었다면 30~60초 걸릴 수 있어요)</p>';
+  $("#m-chart").innerHTML = waking; $("#m-wall").innerHTML = waking;
   const [rows, wall] = await Promise.all([get("/api/macro", {unit: M.unit, types: M.types.join(",")}),
                                           get("/api/maturities", {types: M.types.join(",")})]);
   const periods = [...new Set(rows.map(r => r.period))].sort();

@@ -29,3 +29,8 @@ def fetch_one(sql, params=None):
     with cursor() as cur:
         cur.execute(sql, params or {})
         return cur.fetchone()
+
+
+def execute(sql, params=None):
+    with pool.connection() as con, con.cursor() as cur:
+        cur.execute(sql, params or {})

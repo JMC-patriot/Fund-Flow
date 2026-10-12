@@ -1,66 +1,53 @@
-# fundflow DB 테이블 문서
+# fundflow DB 테이블
 
-- DBMS: PostgreSQL (Supabase) · 스키마 정의: [`supabase/migrations/`](../supabase/migrations/)
-- 적재: `collector/load_db.py` (재실행 시 upsert로 갱신, 중복 없음)
-
-## 테이블 관계
+- DBMS: PostgreSQL (Supabase) · 스키마: [`supabase/migrations/20261012130000_fundflow_v2.sql`](../supabase/migrations/20261012130000_fundflow_v2.sql)
+- 적재: `collector/run.py` (upsert, 재실행해도 중복 없음)
 
 ```
-companies (1) ──< (N) funding_events
-    │
-    └────────────< (N) financials
+filings (공시 대기열) ──수집──▶ securities (증권) ──┐
+                                                   ├── companies
+                     financials / statements ──────┘
+fetch_log: 이미 끝낸 목록 구간·원문 확인 기록
 ```
 
-- 회사 1곳은 여러 건의 자금조달 공시를 냅니다.
-- 회사 1곳은 보고서(분기·반기·사업)·기준(연결/별도)별로 여러 재무제표를 가집니다.
-- 공시와 재무제표는 `corp_code`와 날짜로 연결됩니다. 공시 접수일(`rcept_dt`) 이전에 공시된(`available_from <= rcept_dt`) 가장 최근 재무제표를 발행 직전 재무상태로 씁니다.
+## securities — 증권 발행 1건 = 1행
 
-## companies — 회사
+| 컬럼 | 설명 |
+|---|---|
+| `id` | 출처별 고유키. `D:`결정공시 접수번호, `R:`채무증권 신고서 접수번호:회차, `S:`지분증권 신고서, `P:`정기보고서 행 해시 |
+| `sec_type` | SB 회사채 · CB · BW · EB · RCPS · EQUITY 유상증자 · IPO · CP 기업어음 · STB 단기사채 |
+| `source` | `decision` 주요사항보고서 · `bond_rs` 채무증권 신고서 · `equity_rs` 지분증권 신고서 · `periodic` 정기보고서 발행실적 |
+| `offering` | 공모 / 사모 |
+| `rcept_no`, `rcept_dt` | 원 공시 접수번호, 접수일 |
+| `name`, `series` | 증권 명칭, 회차 |
+| `board_date`, `issue_date`, `maturity_date` | 이사회 결의일, 발행(납입)일, 만기일 |
+| `amount` | 발행금액(원) |
+| `coupon`, `ytm` | 표면이자율, 만기이자율(%) |
+| `conv_price`, `refix_floor` | 전환·행사·교환가액 (유상증자·IPO는 주당 발행가), 리픽싱 최저 조정가액 |
+| `conv_start`, `conv_end`, `underlying`, `shares`, `dilution_pct` | 청구기간, 대상 주식, 주식수, 발행 전 주식총수 대비 % |
+| `rating` | 신용등급(평가기관) — 정기보고서 |
+| `repaid`, `repaid_asof` | 상환 / 미상환 / 일부상환, 기준일 — 정기보고서 |
+| `method`, `underwriter` | 증자·모집 방식, 대표 주관사 |
+| `dkey` | 정정 판별 키. 같은 출처·회사·키면 최신 접수본만 유효 |
+| `superseded` | 정정으로 대체됐거나 다른 출처와 중복이라 숨긴 행 |
+| `raw` | DART 원본 응답 |
 
-| 컬럼 | 타입 | 키 | 설명 |
-|---|---|---|---|
-| `corp_code` | char(8) | **PK** | DART 고유번호 |
-| `corp_name` | text | | 회사명 |
-| `stock_code` | varchar(6) | | 종목코드 |
-| `corp_cls` | char(1) | | 시장 구분 (Y 유가증권 / K 코스닥 / N 코넥스) |
-| `updated_at` | timestamptz | | 마지막 갱신 시각 |
+**잔존 판단**: 채무증권(SB·CB·BW·EB·CP·STB) 중 `maturity_date >= 오늘`이고 `repaid <> '상환'`.
 
-## funding_events — 자금조달 공시
+## financials — 보고서별 주요 재무
 
-| 컬럼 | 타입 | 키 | 설명 |
-|---|---|---|---|
-| `rcept_no` | varchar(14) | **PK** | DART 접수번호 (앞 8자리 = 접수일) |
-| `corp_code` | char(8) | **FK** → companies | 발행 회사 |
-| `ftype` | varchar(6) | | `CB` / `BW` / `EB` / `Equity` (check 제약) |
-| `rcept_dt` | date | | 공시 접수일 |
-| `board_date` | date | | 이사회 결의일 |
-| `amount` | numeric(20,0) | | 발행금액(원). 사채는 권면총액, 유상증자는 자금조달 목적별 금액 합계 |
-| `dilution_pct` | numeric(9,4) | | 발행 전 주식총수 대비 신주 비율(%) |
-| `exercise_price` | numeric(14,2) | | 전환·행사·교환가액 |
-| `coupon_rate` / `ytm_rate` | numeric(7,3) | | 표면이자율 / 만기이자율(%) |
-| `maturity_date` | date | | 사채 만기일 |
-| `method` | text | | 유상증자 방식 (주주배정·제3자배정 등) |
-| `superseded` | boolean | | 정정공시로 대체된 원공시 여부 |
-| `raw` | jsonb | | DART API 원본 응답 전체 |
-| `loaded_at` | timestamptz | | 적재 시각 |
+PK `(corp_code, bsns_year, reprt_code, fs_div)`. `reprt_code`: 11013 1분기 · 11012 반기 · 11014 3분기 · 11011 사업.
+자산·유동자산·비유동자산·부채·유동부채·비유동부채·자본금·이익잉여금·자본, 매출·영업이익·세전이익·순이익(분기는 연초부터 누적).
 
-인덱스: `(ftype, rcept_dt) where not superseded`, `(corp_code)`
+## statements — 전체 재무제표 캐시
 
-## financials — 재무상태표 요약
+화면에서 처음 요청할 때 DART `fnlttSinglAcntAll`로 받아 `data`(jsonb)에 저장합니다.
 
-| 컬럼 | 타입 | 키 | 설명 |
-|---|---|---|---|
-| `corp_code` | char(8) | **PK**, **FK** → companies | 회사 |
-| `bsns_year` | smallint | **PK** | 사업연도 |
-| `reprt_code` | char(5) | **PK** | 11013 1분기 / 11012 반기 / 11014 3분기 / 11011 사업보고서 |
-| `fs_div` | char(3) | **PK** | `CFS` 연결 / `OFS` 별도 |
-| `base_date` | date | | 재무제표 기준일 |
-| `available_from` | date | | 공시 기한 (분기·반기 +45일, 사업 +90일) |
-| `total_assets` | numeric(22,0) | | 자산총계 |
-| `total_liabilities` | numeric(22,0) | | 부채총계 |
-| `total_equity` | numeric(22,0) | | 자본총계 |
+## companies
 
-인덱스: `(corp_code, available_from desc)`
+`corp_code`(DART 고유번호), `corp_name`, `stock_code`(비상장은 null), `corp_cls`(Y 유가 · K 코스닥 · N 코넥스 · E 기타).
 
-## 보안
-세 테이블 모두 RLS(Row Level Security)를 켜 두었고 공개 정책은 없습니다. 브라우저에서 DB에 직접 접근할 수 없고, 모든 조회는 FastAPI 백엔드를 거칩니다.
+## filings — 수집 대기열
+
+공시 목록에서 처리 대상만 저장합니다. `kind`: CB·BW·EB·EQUITY(결정), BOND_RS·EQUITY_RS(신고서), ANNUAL·HALF·Q1·Q3(정기보고서).
+`status`(증권 수집), `fin_status`(재무 수집)가 `pending`이면 다음 실행에서 처리합니다.

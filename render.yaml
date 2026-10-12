@@ -13,5 +13,7 @@ services:
         value: 3.12.7
       - key: DATABASE_URL       # Supabase > Connect > Session pooler 문자열
         sync: false
+      - key: DART_API_KEY       # 전체 재무제표 조회용
+        sync: false
       - key: CORS_ORIGINS       # 예: https://fundflow.vercel.app (쉼표로 여러 개)
         value: "*"

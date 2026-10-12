@@ -1,5 +1,5 @@
 """
-fundflow API — 상장사 자금조달(CB·BW·EB·유상증자) 공시와 재무구조 영향 분석
+fundflow API — 2020년 이후 DART 공시 회사의 자금조달 증권(SB·CB·BW·EB·RCPS·유상증자·IPO·CP·단기사채)
 
 Swagger UI: /docs   ·   ReDoc: /redoc
 """
@@ -8,16 +8,21 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg.types.json import Jsonb
 
-from .db import pool, fetch_all, fetch_one
-from .models import (Source, Summary, MonthlyPoint, Ranking, Impact, Event,
-                     Company, Scenario, BaseFinancials, Health)
+from .db import pool, fetch_all, fetch_one, execute
+from .models import (Health, Meta, TypeInfo, MacroPoint, Security, SecurityPage, MaturityBucket,
+                     CompanyHit, Company, Financial, Statements, StatementLine, Source)
 
-FType = Literal["CB", "BW", "EB", "Equity"]
-TYPE_LABEL = {"CB": "전환사채", "BW": "신주인수권부사채",
-              "EB": "교환사채", "Equity": "유상증자"}
+TYPES = {"SB": "회사채", "CB": "전환사채", "BW": "신주인수권부사채", "EB": "교환사채",
+         "RCPS": "상환전환우선주", "EQUITY": "유상증자", "IPO": "IPO", "CP": "기업어음",
+         "STB": "단기사채"}
+DEBT = ["SB", "CB", "BW", "EB", "CP", "STB"]
+REPORT_NM = {"11013": "1분기", "11012": "반기", "11014": "3분기", "11011": "사업"}
+SecType = Literal["SB", "CB", "BW", "EB", "RCPS", "EQUITY", "IPO", "CP", "STB"]
 
 
 @asynccontextmanager
@@ -29,17 +34,19 @@ async def lifespan(app):
 
 app = FastAPI(
     title="fundflow API",
-    version="1.0.0",
+    version="2.0.0",
     description=(
-        "금융감독원 DART OpenAPI로 수집한 상장사 자금조달 공시(전환사채·신주인수권부사채·"
-        "교환사채·유상증자)를 조회하고, 발행이 자기자본·부채비율에 주는 영향을 계산합니다.\n\n"
-        "- 금액 단위: 원 (KRW)\n- 날짜 형식: YYYY-MM-DD\n"
+        "금융감독원 DART OpenAPI로 수집한 자금조달 증권의 발행 조건·잔존 만기·발행사 재무를 제공합니다.\n\n"
+        "- 금액 단위: 원 (KRW) · 날짜: YYYY-MM-DD · 월: YYYY-MM\n"
+        "- 유형: SB 회사채, CB 전환사채, BW 신주인수권부사채, EB 교환사채, RCPS 상환전환우선주, "
+        "EQUITY 유상증자, IPO, CP 기업어음, STB 단기사채\n"
         "- 데이터 출처: 금융감독원 전자공시시스템 OpenAPI (https://opendart.fss.or.kr)"),
     lifespan=lifespan,
     openapi_tags=[
-        {"name": "meta", "description": "상태 확인·데이터 출처"},
-        {"name": "analysis", "description": "요약·추이·순위·재무 영향 분석"},
-        {"name": "data", "description": "공시 이벤트·회사 원천 데이터 조회"},
+        {"name": "meta", "description": "상태·출처"},
+        {"name": "macro", "description": "연도별·월별 발행 지표, 만기 분포"},
+        {"name": "monitor", "description": "증권별 발행 조건 목록"},
+        {"name": "company", "description": "발행사 정보·재무"},
     ],
 )
 app.add_middleware(
@@ -48,202 +55,255 @@ app.add_middleware(
     allow_methods=["GET"], allow_headers=["*"],
 )
 
-
-# ── 공통 ───────────────────────────────────────────────────────────
-def period(start: Optional[date], end: Optional[date]):
-    return {"start": start or date(1900, 1, 1), "end": end or date(2999, 12, 31)}
-
-
-StartQ = Query(None, description="조회 시작일 (공시 접수일 기준, 포함)", examples=["2025-01-01"])
-EndQ = Query(None, description="조회 종료일 (포함)", examples=["2026-10-12"])
-
-FIN_LATERAL = """
-  left join lateral (
-    select f.bsns_year, f.reprt_code, f.fs_div, f.base_date,
-           f.total_assets, f.total_liabilities, f.total_equity
-    from financials f
-    where f.corp_code = b.corp_code and f.available_from <= b.rcept_dt
-    order by f.base_date desc, (f.fs_div = 'CFS') desc
-    limit 1) f on true"""
-
-REPORT_NM = {"11013": "1분기보고서", "11012": "반기보고서",
-             "11014": "3분기보고서", "11011": "사업보고서"}
+VALID = "not s.superseded and s.amount > 0"
+OUTSTANDING = ("s.sec_type = any(%(debt)s) and s.maturity_date >= current_date "
+               "and coalesce(s.repaid, '') <> '상환'")
 
 
-def scenarios(ftype: str, A: float, L: float, E: float, X: float) -> list[Scenario]:
-    """발행금액 X가 재무상태표에 주는 영향 (조달 현금은 자산으로 유입된다고 가정)"""
-    rows = [("발행 전", A, L, E)]
-    if ftype == "Equity":
-        rows.append(("증자 후", A + X, L, E + X))
-    else:
-        rows.append(("발행 직후", A + X, L + X, E))
-        if ftype == "BW":
-            rows.append(("전액 행사 후", A + 2 * X, L + X, E + X))
-        else:
-            rows.append(("전액 전환 후" if ftype == "CB" else "전액 교환 후", A + X, L, E + X))
-    return [Scenario(label=n, total_assets=a, total_liabilities=l, total_equity=e,
-                     debt_ratio=round(l / e * 100, 2) if e > 0 else None,
-                     equity_ratio=round(e / a * 100, 2) if a > 0 else None)
-            for n, a, l, e in rows]
+def types_param(types: Optional[str]) -> list[str]:
+    if not types:
+        return list(TYPES)
+    out = [t.strip().upper() for t in types.split(",") if t.strip()]
+    bad = [t for t in out if t not in TYPES]
+    if bad:
+        raise HTTPException(422, f"알 수 없는 유형: {', '.join(bad)}")
+    return out
 
 
-def build_impact(r: dict, ftype: str) -> dict:
-    base, sc, vs = None, None, None
-    if r.get("total_equity") is not None:
-        A, L, E = (float(r["total_assets"]), float(r["total_liabilities"]),
-                   float(r["total_equity"]))
-        base = BaseFinancials(
-            report=f'{r["bsns_year"]}년 {REPORT_NM[r["reprt_code"]]}',
-            fs_div="연결" if r["fs_div"] == "CFS" else "별도",
-            base_date=r["base_date"], total_assets=A, total_liabilities=L, total_equity=E)
-        X = float(r["total_amount"])
-        sc = scenarios(ftype, A, L, E, X)
-        vs = round(X / E * 100, 2) if E > 0 else None
-    return {"base": base, "scenarios": sc, "amount_to_equity_pct": vs}
+def month_start(v: Optional[str]) -> Optional[date]:
+    if not v:
+        return None
+    y, *m = v.split("-")
+    return date(int(y), int(m[0]) if m else 1, 1)
 
 
-# ── meta ───────────────────────────────────────────────────────────
+def month_end(v: Optional[str]) -> Optional[date]:
+    if not v:
+        return None
+    y, *m = v.split("-")
+    y, mm = int(y), int(m[0]) if m else 12
+    return date(y + (mm == 12), mm % 12 + 1, 1)          # 다음 달 1일 (미만 비교)
+
+
+TypesQ = Query(None, description="쉼표로 구분한 유형. 생략하면 전체", examples=["SB,CB,BW"])
+
+
+# ── meta ───────────────────────────────────────────────────────────────
 @app.get("/health", response_model=Health, tags=["meta"], summary="서버·DB 상태")
 def health():
-    r = fetch_one("select count(*) as n, max(rcept_dt) as latest from funding_events")
-    return Health(status="ok", events=r["n"], latest_rcept_dt=r["latest"])
+    r = fetch_one("select count(*) as n, max(rcept_dt) as latest from securities where not superseded")
+    return Health(status="ok", securities=r["n"], latest_rcept_dt=r["latest"])
 
 
-@app.get("/api/sources", response_model=list[Source], tags=["meta"],
-         summary="사용 데이터와 출처")
+@app.get("/api/meta", response_model=Meta, tags=["meta"], summary="유형 목록과 데이터 범위")
+def meta():
+    r = fetch_one(f"""select min(issue_date) as f, max(issue_date) as l,
+                             to_char(max(loaded_at) at time zone 'Asia/Seoul', 'YYYY-MM-DD HH24:MI') as loaded
+                      from securities s where {VALID} and issue_date <= current_date""")
+    p = fetch_one("select count(*) as n from filings where status='pending'")
+    return Meta(types=[TypeInfo(code=k, label=v, debt=k in DEBT) for k, v in TYPES.items()],
+                first_issue=r["f"], last_issue=r["l"], last_loaded=r["loaded"],
+                pending_filings=p["n"])
+
+
+@app.get("/api/sources", response_model=list[Source], tags=["meta"], summary="사용 데이터와 출처")
 def sources():
-    base = "https://opendart.fss.or.kr/guide/main.do"
     return [
-        Source(name="전환사채권 발행결정", api="cvbdIsDecsn", provider="금융감독원 DART", url=base,
-               fields="권면총액, 전환가액, 표면·만기이자율, 전환주식수 비율"),
-        Source(name="신주인수권부사채권 발행결정", api="bdwtIsDecsn", provider="금융감독원 DART", url=base,
-               fields="권면총액, 행사가액, 신주 비율"),
-        Source(name="교환사채권 발행결정", api="exbdIsDecsn", provider="금융감독원 DART", url=base,
-               fields="권면총액, 교환가액, 교환대상 주식 비율"),
-        Source(name="유상증자 결정", api="piicDecsn", provider="금융감독원 DART", url=base,
-               fields="신주 수, 증자 전 주식총수, 자금조달 목적별 금액, 증자방식"),
-        Source(name="공시검색", api="list", provider="금융감독원 DART", url=base,
-               fields="주요사항보고서 목록 (대상 회사 선별)"),
-        Source(name="단일회사 주요계정", api="fnlttSinglAcnt", provider="금융감독원 DART", url=base,
-               fields="자산총계, 부채총계, 자본총계 (연결·별도)"),
-        Source(name="고유번호", api="corpCode", provider="금융감독원 DART", url=base,
-               fields="회사 고유번호, 회사명, 종목코드"),
+        Source(name="공시검색", api="list", used_for="주요사항보고서·발행공시·정기공시 목록"),
+        Source(name="전환사채권 발행결정", api="cvbdIsDecsn", used_for="CB 조건 (금리·만기·전환가액·리픽싱)"),
+        Source(name="신주인수권부사채권 발행결정", api="bdwtIsDecsn", used_for="BW 조건"),
+        Source(name="교환사채권 발행결정", api="exbdIsDecsn", used_for="EB 조건"),
+        Source(name="유상증자 결정", api="piicDecsn", used_for="유상증자·RCPS 금액, 신주 수"),
+        Source(name="공시서류원본", api="document", used_for="종류주식 유상증자의 RCPS 여부 판별"),
+        Source(name="증권신고서 채무증권", api="bdRs", used_for="공모 회사채·CP 회차·금액·만기·주관사"),
+        Source(name="증권신고서 지분증권", api="estkRs", used_for="IPO 공모가·공모금액"),
+        Source(name="채무증권 발행실적", api="detScritsIsuAcmslt",
+               used_for="공모·사모 회사채·CP·단기사채, 금리, 신용등급, 상환 여부"),
+        Source(name="다중회사 주요계정", api="fnlttMultiAcnt", used_for="요약 재무·재무지표"),
+        Source(name="단일회사 전체 재무제표", api="fnlttSinglAcntAll", used_for="전체 재무제표 (요청 시)"),
     ]
 
 
-# ── analysis ───────────────────────────────────────────────────────
-@app.get("/api/summary", response_model=list[Summary], tags=["analysis"],
-         summary="발행 유형별 요약")
-def summary(start: Optional[date] = StartQ, end: Optional[date] = EndQ):
-    """유형별 발행금액 합계·건수·회사 수·평균 발행금액·평균 희석률."""
-    rows = fetch_all("""
-        select ftype, sum(amount) as total_amount, count(*) as events,
-               count(distinct corp_code) as companies, avg(amount) as avg_amount,
-               avg(dilution_pct) as avg_dilution_pct,
-               min(rcept_dt) as first_dt, max(rcept_dt) as last_dt
-        from funding_events
-        where not superseded and rcept_dt between %(start)s and %(end)s
-        group by ftype""", period(start, end))
-    by = {r["ftype"]: r for r in rows}
-    return [Summary(ftype=t, label=TYPE_LABEL[t], **{k: v for k, v in by.get(t, {}).items()
-                                                    if k != "ftype"})
-            for t in TYPE_LABEL]
+# ── macro ──────────────────────────────────────────────────────────────
+@app.get("/api/macro", response_model=list[MacroPoint], tags=["macro"],
+         summary="연도별·월별 유형별 발행금액·건수")
+def macro(unit: Literal["year", "month"] = Query("year", description="집계 단위"),
+          types: Optional[str] = TypesQ,
+          start: Optional[str] = Query(None, description="시작 연월 YYYY-MM", examples=["2020-01"]),
+          end: Optional[str] = Query(None, description="끝 연월 YYYY-MM (포함)", examples=["2026-10"])):
+    fmt = "YYYY" if unit == "year" else "YYYY-MM"
+    return fetch_all(f"""
+        select to_char(issue_date, '{fmt}') as period, sec_type, sum(amount) as amount,
+               count(*) as count, count(distinct corp_code) as companies
+        from securities s
+        where {VALID} and issue_date is not null and issue_date <= current_date
+          and sec_type = any(%(types)s)
+          and (%(s)s::date is null or issue_date >= %(s)s) and (%(e)s::date is null or issue_date < %(e)s)
+        group by 1, 2 order by 1, 2""",
+        {"types": types_param(types), "s": month_start(start), "e": month_end(end)})
 
 
-@app.get("/api/stats/monthly", response_model=list[MonthlyPoint], tags=["analysis"],
-         summary="월별 발행 추이")
-def monthly(start: Optional[date] = StartQ, end: Optional[date] = EndQ):
-    return fetch_all("""
-        select to_char(date_trunc('month', rcept_dt), 'YYYY-MM') as month, ftype,
-               sum(amount) as total_amount, count(*) as events
-        from funding_events
-        where not superseded and rcept_dt between %(start)s and %(end)s
-        group by 1, 2 order by 1, 2""", period(start, end))
+@app.get("/api/maturities", response_model=list[MaturityBucket], tags=["macro"],
+         summary="잔존 채무증권의 만기 분포")
+def maturities(types: Optional[str] = TypesQ):
+    """오늘 기준 잔존만기 구간별 금액. 상환 완료로 확인된 증권은 제외합니다."""
+    return fetch_all(f"""
+        select case when d <= 90 then '0-3m' when d <= 182 then '3-6m' when d <= 365 then '6-12m'
+                    when d <= 730 then '1-2y' when d <= 1095 then '2-3y' else '3y+' end as bucket,
+               sec_type, sum(amount) as amount, count(*) as count
+        from (select s.*, s.maturity_date - current_date as d from securities s
+              where {VALID} and {OUTSTANDING} and s.sec_type = any(%(types)s)) s
+        group by 1, 2""",
+        {"debt": DEBT, "types": [t for t in types_param(types) if t in DEBT]})
 
 
-RANK_SQL = """
-    with ev as (
-      select * from funding_events
-      where not superseded and ftype = %(ftype)s
-        and rcept_dt between %(start)s and %(end)s {corp_filter}),
-    agg as (
-      select corp_code, sum(amount) as total_amount, count(*) as events,
-             sum(dilution_pct) as dilution_pct, max(rcept_dt) as last_rcept_dt
-      from ev group by corp_code),
-    b as (
-      select distinct on (corp_code) corp_code, rcept_no, rcept_dt
-      from ev order by corp_code, amount desc)
-    select a.*, c.corp_name, c.stock_code, b.rcept_no as main_rcept_no, f.*
-    from agg a join companies c using (corp_code) join b using (corp_code)
-    {fin}
-    order by a.total_amount desc
-    limit %(limit)s"""
+# ── monitor ────────────────────────────────────────────────────────────
+SEC_COLS = """s.id, s.corp_code, c.corp_name, c.stock_code, c.corp_cls, s.sec_type, s.source,
+  s.offering, s.name, s.series, s.rcept_dt, s.issue_date, s.amount, s.coupon, s.ytm,
+  s.maturity_date, s.maturity_date - current_date as days_left, s.conv_price, s.refix_floor,
+  s.conv_start, s.conv_end, s.underlying, s.shares, s.dilution_pct, s.rating, s.repaid,
+  s.repaid_asof, s.method, s.underwriter,
+  case when s.rcept_no is not null then 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' || s.rcept_no end as dart_url"""
+
+SORTS = {"maturity": "s.maturity_date asc nulls last, s.amount desc",
+         "issue": "s.issue_date desc nulls last, s.amount desc",
+         "amount": "s.amount desc nulls last",
+         "coupon": "s.coupon desc nulls last, s.amount desc"}
 
 
-@app.get("/api/rankings", response_model=list[Ranking], tags=["analysis"],
-         summary="유형별 발행금액 상위 회사 + 재무 영향")
-def rankings(ftype: FType = Query(..., description="발행 유형"),
-             limit: int = Query(5, ge=1, le=50, description="상위 N개사"),
-             start: Optional[date] = StartQ, end: Optional[date] = EndQ):
-    """회사별로 같은 유형의 발행금액을 합산해 순위를 매기고, 각 회사의 **최대 규모 발행 직전에
-    공시된 재무제표**를 기준으로 발행 전·후 부채비율과 자기자본비율을 계산합니다."""
-    rows = fetch_all(RANK_SQL.format(corp_filter="", fin=FIN_LATERAL),
-                     {"ftype": ftype, "limit": limit, **period(start, end)})
-    return [Ranking(rank=i, corp_code=r["corp_code"], corp_name=r["corp_name"],
-                    stock_code=r["stock_code"], total_amount=r["total_amount"],
-                    events=r["events"], dilution_pct=r["dilution_pct"],
-                    last_rcept_dt=r["last_rcept_dt"], main_rcept_no=r["main_rcept_no"],
-                    **build_impact(r, ftype))
-            for i, r in enumerate(rows, 1)]
+@app.get("/api/securities", response_model=SecurityPage, tags=["monitor"],
+         summary="증권별 발행 조건 목록 (기본: 잔존 채무증권, 만기 임박 순)")
+def securities(types: Optional[str] = TypesQ,
+               status: Literal["outstanding", "all"] = Query(
+                   "outstanding", description="outstanding: 만기 전·미상환 채무증권만 / all: 전체"),
+               offering: Optional[Literal["공모", "사모"]] = Query(None),
+               q: Optional[str] = Query(None, description="회사명 일부 또는 종목코드"),
+               corp_code: Optional[str] = Query(None),
+               issue_from: Optional[str] = Query(None, description="발행 연월 시작 YYYY-MM"),
+               issue_to: Optional[str] = Query(None, description="발행 연월 끝 YYYY-MM (포함)"),
+               maturity_from: Optional[str] = Query(None, description="만기 연월 시작 YYYY-MM"),
+               maturity_to: Optional[str] = Query(None, description="만기 연월 끝 YYYY-MM (포함)"),
+               sort: Literal["maturity", "issue", "amount", "coupon"] = Query("maturity"),
+               limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+    where = f"""{VALID} and s.sec_type = any(%(types)s)
+      and (%(status)s = 'all' or ({OUTSTANDING}))
+      and (%(off)s::text is null or s.offering = %(off)s)
+      and (%(corp)s::text is null or s.corp_code = %(corp)s)
+      and (%(q)s::text is null or c.corp_name ilike '%%' || %(q)s || '%%' or c.stock_code = %(q)s)
+      and (%(i1)s::date is null or s.issue_date >= %(i1)s) and (%(i2)s::date is null or s.issue_date < %(i2)s)
+      and (%(m1)s::date is null or s.maturity_date >= %(m1)s) and (%(m2)s::date is null or s.maturity_date < %(m2)s)"""
+    p = {"types": types_param(types), "status": status, "debt": DEBT, "off": offering,
+         "corp": corp_code, "q": (q or "").strip() or None,
+         "i1": month_start(issue_from), "i2": month_end(issue_to),
+         "m1": month_start(maturity_from), "m2": month_end(maturity_to),
+         "limit": limit, "offset": offset}
+    agg = fetch_one(f"""select count(*) as n, coalesce(sum(s.amount), 0) as amt
+                        from securities s join companies c using (corp_code) where {where}""", p)
+    items = fetch_all(f"""select {SEC_COLS} from securities s join companies c using (corp_code)
+                          where {where} order by {SORTS[sort]}, s.id
+                          limit %(limit)s offset %(offset)s""", p)
+    return SecurityPage(total=agg["n"], total_amount=agg["amt"], items=items)
 
 
-@app.get("/api/companies/{corp_code}/impact", response_model=Impact, tags=["analysis"],
-         summary="회사 한 곳의 발행 전후 재무비율")
-def company_impact(corp_code: str, ftype: FType = Query(..., description="발행 유형"),
-                   start: Optional[date] = StartQ, end: Optional[date] = EndQ):
-    rows = fetch_all(RANK_SQL.format(corp_filter="and corp_code = %(corp_code)s",
-                                     fin=FIN_LATERAL),
-                     {"ftype": ftype, "limit": 1, "corp_code": corp_code, **period(start, end)})
-    if not rows:
-        raise HTTPException(404, "해당 회사·유형의 발행 공시가 없습니다")
-    r = rows[0]
-    return Impact(corp_code=corp_code, corp_name=r["corp_name"], ftype=ftype,
-                  total_amount=r["total_amount"], events=r["events"],
-                  dilution_pct=r["dilution_pct"], **build_impact(r, ftype))
+# ── company ────────────────────────────────────────────────────────────
+@app.get("/api/companies", response_model=list[CompanyHit], tags=["company"], summary="회사 검색")
+def search_companies(q: str = Query(..., min_length=1, description="회사명 일부 또는 종목코드"),
+                     limit: int = Query(10, ge=1, le=50)):
+    return fetch_all(f"""
+        select c.corp_code, c.corp_name, c.stock_code, c.corp_cls,
+               coalesce(sum(s.amount) filter (where {OUTSTANDING}), 0) as outstanding,
+               sum(s.amount) as total_amount, count(*) as count
+        from companies c join securities s using (corp_code)
+        where {VALID} and (c.corp_name ilike '%%' || %(q)s || '%%' or c.stock_code = %(q)s)
+        group by c.corp_code
+        order by (c.corp_name = %(q)s) desc, outstanding desc, total_amount desc
+        limit %(limit)s""", {"q": q.strip(), "limit": limit, "debt": DEBT})
 
 
-# ── data ───────────────────────────────────────────────────────────
-@app.get("/api/events", response_model=list[Event], tags=["data"], summary="공시 이벤트 목록")
-def events(ftype: Optional[FType] = Query(None, description="발행 유형"),
-           corp_code: Optional[str] = Query(None, description="DART 고유번호 8자리"),
-           start: Optional[date] = StartQ, end: Optional[date] = EndQ,
-           include_superseded: bool = Query(False, description="정정으로 대체된 원공시 포함"),
-           limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
-    return fetch_all("""
-        select e.rcept_no, e.corp_code, c.corp_name, e.ftype, e.rcept_dt, e.board_date,
-               e.amount, e.dilution_pct, e.exercise_price, e.coupon_rate, e.ytm_rate,
-               e.maturity_date, e.method, e.superseded,
-               'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' || e.rcept_no as dart_url
-        from funding_events e join companies c using (corp_code)
-        where e.rcept_dt between %(start)s and %(end)s
-          and (%(ftype)s::text is null or e.ftype = %(ftype)s)
-          and (%(corp)s::text is null or e.corp_code = %(corp)s)
-          and (%(sup)s or not e.superseded)
-        order by e.rcept_dt desc, e.rcept_no desc
-        limit %(limit)s offset %(offset)s""",
-        {"ftype": ftype, "corp": corp_code, "sup": include_superseded,
-         "limit": limit, "offset": offset, **period(start, end)})
-
-
-@app.get("/api/companies/{corp_code}", response_model=Company, tags=["data"],
+@app.get("/api/companies/{corp_code}", response_model=Company, tags=["company"],
          summary="회사 정보와 유형별 발행 합계")
 def company(corp_code: str):
-    c = fetch_one("select corp_code, corp_name, stock_code, corp_cls from companies "
-                  "where corp_code = %(c)s", {"c": corp_code})
+    c = fetch_one("select corp_code, corp_name, stock_code, corp_cls from companies where corp_code=%(c)s",
+                  {"c": corp_code})
     if not c:
         raise HTTPException(404, "회사를 찾을 수 없습니다")
-    totals = fetch_all("""
-        select ftype, sum(amount) as total_amount, count(*) as events
-        from funding_events where corp_code = %(c)s and not superseded
-        group by ftype order by total_amount desc""", {"c": corp_code})
+    totals = fetch_all(f"""
+        select sec_type, sum(amount) as amount, count(*) as count,
+               coalesce(sum(amount) filter (where {OUTSTANDING}), 0) as outstanding
+        from securities s where {VALID} and corp_code=%(c)s group by 1 order by 2 desc""",
+        {"c": corp_code, "debt": DEBT})
     return Company(**c, totals=totals)
+
+
+def ratios(r: dict) -> dict:
+    def div(a, b):
+        return round(float(a) / float(b) * 100, 2) if a is not None and b not in (None, 0) and float(b) > 0 else None
+    return {**r, "report": f'{r["bsns_year"]}년 {REPORT_NM[r["reprt_code"]]}',
+            "fs_div": "연결" if r["fs_div"] == "CFS" else "별도",
+            "debt_ratio": div(r["total_liab"], r["total_equity"]),
+            "equity_ratio": div(r["total_equity"], r["total_assets"]),
+            "current_ratio": div(r["current_assets"], r["current_liab"]),
+            "op_margin": div(r["op_income"], r["revenue"]) if r["revenue"] else None}
+
+
+@app.get("/api/companies/{corp_code}/financials", response_model=list[Financial], tags=["company"],
+         summary="요약 재무와 재무지표 추이")
+def financials(corp_code: str):
+    """보고서별 주요 계정과 부채비율·자기자본비율·유동비율·영업이익률. 연결 우선, 없으면 별도. 최신순."""
+    rows = fetch_all("""
+        select distinct on (bsns_year, reprt_code) * from financials where corp_code=%(c)s
+        order by bsns_year, reprt_code, (fs_div='CFS') desc""", {"c": corp_code})
+    rows.sort(key=lambda r: r["base_date"], reverse=True)
+    return [ratios(r) for r in rows]
+
+
+def _dart_statements(corp_code, year, reprt, fs_div):
+    key = os.getenv("DART_API_KEY")
+    if not key:
+        raise HTTPException(503, "서버에 DART_API_KEY가 설정되지 않았습니다")
+    j = requests.get("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json", timeout=30, params={
+        "crtfc_key": key, "corp_code": corp_code, "bsns_year": year, "reprt_code": reprt,
+        "fs_div": fs_div}).json()
+    if j.get("status") == "013":
+        return []
+    if j.get("status") != "000":
+        raise HTTPException(502, f'DART 오류 {j.get("status")} {j.get("message")}')
+    return j["list"]
+
+
+def _amt(v):
+    try:
+        return float(str(v).replace(",", "")) if v not in (None, "", "-") else None
+    except ValueError:
+        return None
+
+
+@app.get("/api/companies/{corp_code}/statements", response_model=Statements, tags=["company"],
+         summary="전체 재무제표 (DART에서 받아 저장)")
+def statements(corp_code: str, bsns_year: int = Query(..., ge=2015),
+               reprt_code: Literal["11011", "11012", "11013", "11014"] = Query("11011"),
+               fs_div: Literal["CFS", "OFS"] = Query("CFS")):
+    """처음 요청 시 DART 단일회사 전체 재무제표를 받아 저장하고, 이후에는 저장본을 돌려줍니다."""
+    p = {"c": corp_code, "y": bsns_year, "r": reprt_code, "f": fs_div}
+    row = fetch_one("""select data from statements where corp_code=%(c)s and bsns_year=%(y)s
+                       and reprt_code=%(r)s and fs_div=%(f)s""", p)
+    if row:
+        data = row["data"]
+    else:
+        data = _dart_statements(corp_code, bsns_year, reprt_code, fs_div)
+        if fetch_one("select 1 as x from companies where corp_code=%(c)s", p):
+            execute("""insert into statements (corp_code, bsns_year, reprt_code, fs_div, data)
+                       values (%(c)s,%(y)s,%(r)s,%(f)s,%(d)s) on conflict do nothing""",
+                    {**p, "d": Jsonb(data)})
+    lines = [StatementLine(sj_div=d.get("sj_div", ""), sj_nm=d.get("sj_nm"),
+                           account_nm=(d.get("account_nm") or "").strip(),
+                           # 분기·반기 손익은 연초부터 누적(add) 우선
+                           this=_amt(d.get("thstrm_add_amount")) if _amt(d.get("thstrm_add_amount")) is not None
+                           else _amt(d.get("thstrm_amount")),
+                           prev=next((v for v in (_amt(d.get(k)) for k in
+                                      ("frmtrm_add_amount", "frmtrm_amount", "frmtrm_q_amount"))
+                                      if v is not None), None),
+                           prev2=_amt(d.get("bfefrmtrm_amount")))
+             for d in sorted(data, key=lambda d: (d.get("sj_div", ""), int(d.get("ord") or 0)))]
+    return Statements(corp_code=corp_code, bsns_year=bsns_year, reprt_code=reprt_code,
+                      fs_div=fs_div, lines=lines)

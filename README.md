@@ -1,6 +1,6 @@
 # fundflow
 
-DART에 공시된 회사들의 자금조달 증권(회사채 SB·CB·BW·EB·RCPS·유상증자·IPO·CP·단기사채)을 **2020년부터 매일** 수집해서
+DART에 공시된 회사들의 자금조달 증권(회사채 SB·CB·BW·EB·RCPS·유상증자·IPO·CP·단기사채)을 **2020년부터 3시간마다** 수집해서
 발행 Macro 지표, 만기 임박 순 발행 조건 Monitor, 발행사 재무와 발행 시뮬레이션을 보여주는 대시보드입니다.
 
 ## 화면
@@ -14,7 +14,7 @@ DART에 공시된 회사들의 자금조달 증권(회사채 SB·CB·BW·EB·RCP
 ## 아키텍처
 
 ```
-DART OpenAPI ──▶ collector (GitHub Actions, 매일 04:00) ──▶ Supabase PostgreSQL ──▶ FastAPI (Render) ──▶ 화면 (Vercel)
+DART OpenAPI ──▶ collector (GitHub Actions, 3시간마다) ──▶ Supabase PostgreSQL ──▶ FastAPI (Render) ──▶ 화면 (Vercel)
 ```
 
 | 구분 | 위치 | 배포 |
@@ -39,9 +39,9 @@ DART OpenAPI ──▶ collector (GitHub Actions, 매일 04:00) ──▶ Supaba
 
 ## 수집 방식
 
-- `python collector/run.py`가 초기 적재와 매일 업데이트를 모두 처리합니다. 공시 목록을 `filings` 대기열에 쌓고, 처리한 것은 다시 호출하지 않습니다.
-- DART 일일 한도(2만 회) 때문에 한 번에 최대 18,000회만 호출하고 멈춥니다. 다음 실행이 이어받습니다.
-  2020년 이후 초기 적재는 하루 1회 실행 기준 2~3일 걸립니다. 서두르려면 Actions 탭에서 `daily-collect`를 수동 실행하세요(하루 한도 안에서).
+- `python collector/run.py`가 초기 적재와 정기 업데이트를 모두 처리합니다. 공시 목록을 `filings` 대기열에 쌓고, 처리한 것은 다시 호출하지 않습니다.
+- GitHub Actions가 3시간마다 실행합니다. DART 일일 한도(2만 회)에 걸리면 그날은 멈추고, 한도가 리셋된 뒤 다음 실행이 이어받습니다.
+  2020년 이후 초기 적재(약 4만 회 호출)는 2~3일 걸리고, 이후에는 새 공시만 반영합니다. 즉시 실행하려면 Actions 탭 > `daily-collect` > Run workflow.
 - 정정공시는 같은 회차·금액 기준 최신 접수본만, 정기보고서와 공시에 같은 발행이 있으면 공시 행에 등급·상환 여부를 합칩니다.
 
 ## 로컬 실행

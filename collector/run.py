@@ -312,8 +312,12 @@ def main():
     ap.add_argument("--budget", type=int, default=int(os.getenv("DART_BUDGET", 18000)))
     a = ap.parse_args()
 
-    dart = Dart(os.environ["DART_API_KEY"].strip(), a.budget)
-    db = Store(os.environ["DATABASE_URL"].strip())
+    env = {k: (os.getenv(k) or "").strip() for k in ("DART_API_KEY", "DATABASE_URL")}
+    missing = [k for k, v in env.items() if not v]
+    if missing:
+        sys.exit(f"환경변수가 비어 있습니다: {', '.join(missing)} (.env 또는 GitHub Secrets 확인)")
+    dart = Dart(env["DART_API_KEY"], a.budget)
+    db = Store(env["DATABASE_URL"])
     since = date.fromisoformat(a.since)
     try:
         # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)

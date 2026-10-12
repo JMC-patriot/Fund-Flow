@@ -8,7 +8,7 @@ load_dotenv()
 
 # Supabase: Render에서는 IPv4 호환 'Session pooler' 연결 문자열 사용
 pool = ConnectionPool(
-    os.environ["DATABASE_URL"], min_size=1, max_size=5, open=False,
+    os.environ["DATABASE_URL"].strip(), min_size=1, max_size=5, open=False,
     kwargs={"row_factory": dict_row, "prepare_threshold": None},
 )
 

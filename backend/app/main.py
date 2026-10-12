@@ -262,7 +262,7 @@ def _dart_statements(corp_code, year, reprt, fs_div):
     if not key:
         raise HTTPException(503, "서버에 DART_API_KEY가 설정되지 않았습니다")
     j = requests.get("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json", timeout=30, params={
-        "crtfc_key": key, "corp_code": corp_code, "bsns_year": year, "reprt_code": reprt,
+        "crtfc_key": key.strip(), "corp_code": corp_code, "bsns_year": year, "reprt_code": reprt,
         "fs_div": fs_div}).json()
     if j.get("status") == "013":
         return []

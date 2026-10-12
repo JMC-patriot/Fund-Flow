@@ -312,8 +312,8 @@ def main():
     ap.add_argument("--budget", type=int, default=int(os.getenv("DART_BUDGET", 18000)))
     a = ap.parse_args()
 
-    dart = Dart(os.environ["DART_API_KEY"], a.budget)
-    db = Store(os.environ["DATABASE_URL"])
+    dart = Dart(os.environ["DART_API_KEY"].strip(), a.budget)
+    db = Store(os.environ["DATABASE_URL"].strip())
     since = date.fromisoformat(a.since)
     try:
         scan_lists(dart, db, since)

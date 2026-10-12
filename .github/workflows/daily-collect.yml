@@ -33,4 +33,24 @@ jobs:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DART_BUDGET: ${{ github.event.inputs.budget || '100000' }}
-        run: python collector/run.py
+        shell: bash
+        run: python -u collector/run.py 2>&1 | tee run.log
+      # 휴대폰 알림: ntfy 앱에서 아래 토픽을 구독하면 실행이 끝날 때마다 결과가 옵니다
+      - name: Notify
+        if: always()
+        env:
+          NTFY_TOPIC: fundflow-gt8o4jf8kg
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          ok = os.environ["JOB_STATUS"] == "success"
+          log = open("run.log", encoding="utf-8").read() if os.path.exists("run.log") else ""
+          lines = [l for l in log.splitlines() if re.search(r"DART 호출|증권 현황|※|Error|환경변수", l)][-4:]
+          msg = {"topic": os.environ["NTFY_TOPIC"], "title": "fundflow 수집 " + ("완료" if ok else "실패"),
+                 "message": "\n".join(lines) or "로그 없음", "tags": ["white_check_mark" if ok else "x"],
+                 "click": "https://fund-flow-frontend-six.vercel.app"}
+          req = urllib.request.Request("https://ntfy.sh", json.dumps(msg).encode(), {"Content-Type": "application/json"})
+          try: urllib.request.urlopen(req, timeout=15)
+          except Exception as e: print("ntfy 실패:", e)
+          PY

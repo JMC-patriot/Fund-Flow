@@ -92,6 +92,8 @@ h3{font-size:14px;margin:0 0 10px}
 .seg button{border:0;background:none;padding:0 11px;height:30px;font-size:13px;cursor:pointer;color:var(--text-2);white-space:nowrap}
 .seg button+button{border-left:1px solid var(--line)}
 .seg button.on{background:var(--sel);color:var(--accent);font-weight:600}
+.seg-lg button{height:36px;padding:0 18px;font-size:14px}
+#m-chart [data-period]{cursor:pointer}
 .field{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
 .field input,.field select{height:32px;border:1px solid var(--line);border-radius:7px;background:var(--surface);padding:0 8px;color:var(--text);font-size:13px;min-width:0}
 .field input[type=month]{width:140px}
@@ -233,7 +235,7 @@ function stackedBars(periods, types, val, {W = 720, H = 260, fmt = won, labelEve
     const det = types.filter(t => val(p, t)).map(t => `${SHORT[t]} ${fmt(val(p, t))}`).join(" · ");
     types.forEach(t => { const v = val(p, t); if (!v) return; const h = y(v); base -= h;
       g += `<rect x="${x}" y="${base}" width="${bw}" height="${Math.max(h - 1, .6)}" fill="var(--${t})"/>`; });
-    g += `<rect x="${pl + step * i}" y="${pt}" width="${step}" height="${H - pb - pt}" fill="transparent" data-tip="${esc(`${p} 합계 ${fmt(tot[i])} — ${det}`)}"/>`;
+    g += `<rect x="${pl + step * i}" y="${pt}" width="${step}" height="${H - pb - pt}" fill="transparent" data-period="${esc(p)}" data-tip="${esc(`${p} 합계 ${fmt(tot[i])} — ${det}`)}"/>`;
     if (i % every === 0) g += `<text x="${x + bw / 2}" y="${H - 7}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(p.length > 4 ? p.slice(2).replace("-", ".") : p)}</text>`;
   });
   const mi = tot.indexOf(max);
@@ -244,12 +246,18 @@ const legend = types => `<div class="legend">${types.map(t => `<span><i style="b
 const chips = (types, on, attr) => types.map(t => `<button class="chip ${on.includes(t) ? "on" : ""}" style="--c:var(--${t})" data-${attr}="${t}"><i></i>${SHORT[t]}</button>`).join("");
 
 /* ══════════════ 1. 개요 (Macro) ══════════════ */
-const M = {unit: "year", types: [...MAIN6], metric: "amount"};
+const M = {unit: "year", year: "", fin: "exclude", types: [...MAIN6], metric: "amount"};
+const YEARS = Array.from({length: new Date().getFullYear() - 2019}, (_, i) => String(new Date().getFullYear() - i));
 async function viewMacro(el) {
   el.innerHTML = `
-    <div class="row between"><div><h1>자금조달 Macro 지표</h1><p class="sub" id="m-range">연도별·월별 증권 종류별 발행량과 발행 건수</p></div>
-      <div class="row"><div class="seg" id="m-unit"><button data-u="year">연도별</button><button data-u="month">월별</button></div>
-        <div class="seg" id="m-metric"><button data-k="amount">발행금액</button><button data-k="count">건수</button></div></div></div>
+    <div><h1>자금조달 Macro 지표</h1><p class="sub" id="m-range">연도별·월별 증권 종류별 발행량과 발행 건수</p></div>
+    <div class="row sec" style="gap:12px">
+      <div class="seg seg-lg" id="m-unit"><button data-u="year">연도별</button><button data-u="month">월별</button></div>
+      <label class="field" style="flex-direction:row;align-items:center;gap:6px;font-size:13px">기간
+        <select id="m-year"><option value="">전체 (2020~)</option>${YEARS.map(y => `<option value="${y}" ${M.year === y ? "selected" : ""}>${y}년</option>`).join("")}</select></label>
+      <div class="seg" id="m-metric"><button data-k="amount">발행금액</button><button data-k="count">건수</button></div>
+      <div class="seg" id="mfin" title="은행·금융지주·증권·카드·캐피탈·보험 등의 금융채"><button data-mfin="exclude">금융회사 제외</button><button data-mfin="include">포함</button></div>
+    </div>
     <div class="chips sec" id="m-types">${chips(TYPES, M.types, "mt")}</div>
     <div class="kpis sec" id="m-kpis"></div>
     <div class="grid2 sec">
@@ -261,23 +269,31 @@ async function viewMacro(el) {
       <div class="tbl-wrap scroll-y" style="margin-top:8px"><table id="m-table"></table></div></div>`;
   $$("#m-unit button", el).forEach(b => b.classList.toggle("on", b.dataset.u === M.unit));
   $$("#m-metric button", el).forEach(b => b.classList.toggle("on", b.dataset.k === M.metric));
+  $$("#mfin button", el).forEach(b => b.classList.toggle("on", b.dataset.mfin === M.fin));
   el.onclick = e => {
     const u = e.target.closest("[data-u]"), k = e.target.closest("[data-k]"), t = e.target.closest("[data-mt]");
+    const pd = e.target.closest("#m-chart [data-period]");
+    if (pd && M.unit === "year") { M.unit = "month"; M.year = pd.dataset.period; viewMacro(el); return; }
+    const fb = e.target.closest("[data-mfin]");
+    if (fb) { M.fin = fb.dataset.mfin; viewMacro(el); return; }
     if (u) { M.unit = u.dataset.u; viewMacro(el); }
     if (k) { M.metric = k.dataset.k; viewMacro(el); }
     if (t) { const c = t.dataset.mt; M.types = M.types.includes(c) ? M.types.filter(x => x !== c) : TYPES.filter(x => M.types.includes(x) || x === c); viewMacro(el); }
     const b = e.target.closest("[data-bucket]");
-    if (b) { Object.assign(MO, {status: "outstanding", types: DEBT.filter(x => M.types.includes(x)).join(",") || DEBT.join(","), ...BUCKET_RANGE(b.dataset.bucket), page: 0}); location.hash = "#/monitor"; }
+    if (b) { Object.assign(MO, {status: "outstanding", fin: M.fin, types: DEBT.filter(x => M.types.includes(x)).join(",") || DEBT.join(","), ...BUCKET_RANGE(b.dataset.bucket), page: 0}); location.hash = "#/monitor"; }
   };
+  $("#m-year", el).onchange = e => { M.year = e.target.value; if (M.year) M.unit = "month"; viewMacro(el); };
   const waking = '<p class="na">불러오는 중… (서버가 잠들어 있었다면 30~60초 걸릴 수 있어요)</p>';
   $("#m-chart").innerHTML = waking; $("#m-wall").innerHTML = waking;
-  const [rows, wall] = await Promise.all([get("/api/macro", {unit: M.unit, types: M.types.join(",")}),
-                                          get("/api/maturities", {types: M.types.join(",")})]);
+  const [rows, wall] = await Promise.all([get("/api/macro", {unit: M.unit, types: M.types.join(","), start: M.year && M.year + "-01", end: M.year && M.year + "-12", fin: M.fin}),
+                                          get("/api/maturities", {types: M.types.join(","), fin: M.fin})]);
   const periods = [...new Set(rows.map(r => r.period))].sort();
   const by = {}; rows.forEach(r => (by[r.period] ||= {})[r.sec_type] = r);
   const val = (p, t) => by[p]?.[t]?.[M.metric] || 0;
   const fmt = M.metric === "amount" ? won : v => n0(v) + "건";
-  $("#m-ctitle").textContent = `${M.unit === "year" ? "연도별" : "월별"} ${M.metric === "amount" ? "발행금액" : "발행 건수"}`;
+  $("#m-ctitle").innerHTML = `${M.year ? M.year + "년 " : ""}${M.unit === "year" ? "연도별" : "월별"} ${M.metric === "amount" ? "발행금액" : "발행 건수"}` +
+    (M.unit === "year" ? ' <span class="na" style="font-weight:400">· 막대를 누르면 그해 월별로</span>' : M.year ? ' <a href="#/macro" id="m-all" style="font-weight:400;font-size:12px">← 전체 기간</a>' : "");
+  $("#m-all", el)?.addEventListener("click", e => { e.preventDefault(); M.year = ""; M.unit = "year"; viewMacro(el); });
   $("#m-chart").innerHTML = stackedBars(periods, M.types, val, {fmt});
   if (periods.length) $("#m-range").textContent = `${periods[0]} – ${periods.at(-1)} · 발행일 기준 · 정정·중복 공시 제외`;
 
@@ -315,7 +331,7 @@ function BUCKET_RANGE(b) {
 }
 
 /* ══════════════ 2. 만기 Monitor ══════════════ */
-const MO = {types: BONDS.join(","), status: "outstanding", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity", page: 0, size: 50};
+const MO = {types: BONDS.join(","), status: "outstanding", fin: "exclude", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity", page: 0, size: 50};
 async function viewMonitor(el) {
   const on = MO.types.split(",").filter(Boolean);
   el.innerHTML = `
@@ -325,7 +341,8 @@ async function viewMonitor(el) {
       <div class="row" style="justify-content:space-between;align-items:flex-start;gap:14px">
         <div class="chips" id="mo-types">${chips(TYPES, on, "ty")}
           <button class="chip" data-preset="bonds">사채</button><button class="chip" data-preset="debt">채무증권+CP</button><button class="chip" data-preset="all">전체</button></div>
-        <div class="seg" id="mo-status"><button data-st="outstanding">잔존만</button><button data-st="all">전체</button></div>
+        <div class="row"><div class="seg" id="mofin" title="은행·금융지주·증권·카드·캐피탈·보험 등의 금융채"><button data-mofin="exclude">금융회사 제외</button><button data-mofin="include">포함</button></div>
+          <div class="seg" id="mo-status"><button data-st="outstanding">잔존만</button><button data-st="all">전체</button></div></div>
       </div>
       <div class="row" style="margin-top:12px;align-items:flex-end">
         <label class="field">회사<input id="mo-q" placeholder="회사명·종목코드" value="${esc(MO.q)}" style="width:150px"></label>
@@ -342,6 +359,7 @@ async function viewMonitor(el) {
       <div class="tbl-wrap" style="margin-top:6px"><table id="mo-table"><tbody><tr><td class="l na">불러오는 중…</td></tr></tbody></table></div>
       <div class="pager"><span id="mo-pg"></span><span><button class="btn" id="mo-prev">이전</button> <button class="btn" id="mo-next">다음</button></span></div></div>`;
   $$("#mo-status button", el).forEach(b => b.classList.toggle("on", b.dataset.st === MO.status));
+  $$("#mofin button", el).forEach(b => b.classList.toggle("on", b.dataset.mofin === MO.fin));
   const reload = () => { MO.page = 0; viewMonitor(el); };
   el.onclick = e => {
     const t = e.target.closest("[data-ty]"), pr = e.target.closest("[data-preset]"), st = e.target.closest("[data-st]");
@@ -349,6 +367,8 @@ async function viewMonitor(el) {
       MO.types = (cur.includes(c) ? cur.filter(x => x !== c) : TYPES.filter(x => cur.includes(x) || x === c)).join(","); reload(); }
     if (pr) { MO.types = ({bonds: BONDS, debt: DEBT, all: TYPES})[pr.dataset.preset].join(","); if (pr.dataset.preset === "all") MO.status = "all"; reload(); }
     if (st) { MO.status = st.dataset.st; reload(); }
+    const fb = e.target.closest("[data-mofin]");
+    if (fb) { MO.fin = fb.dataset.mofin; reload(); }
     const row = e.target.closest("tr[data-corp]");
     if (row && !e.target.closest("a")) location.hash = "#/company/" + row.dataset.corp;
   };
@@ -356,7 +376,7 @@ async function viewMonitor(el) {
   bind("#mo-off", "offering"); bind("#mo-i1", "issue_from"); bind("#mo-i2", "issue_to");
   bind("#mo-m1", "maturity_from"); bind("#mo-m2", "maturity_to"); bind("#mo-sort", "sort");
   let tq; $("#mo-q", el).addEventListener("input", e => { clearTimeout(tq); tq = setTimeout(() => { MO.q = e.target.value.trim(); MO.page = 0; loadMonitorRows(el); }, 300); });
-  $("#mo-reset", el).onclick = () => { Object.assign(MO, {types: BONDS.join(","), status: "outstanding", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity"}); reload(); };
+  $("#mo-reset", el).onclick = () => { Object.assign(MO, {types: BONDS.join(","), status: "outstanding", fin: "exclude", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity"}); reload(); };
   $("#mo-prev", el).onclick = () => { if (MO.page > 0) { MO.page--; loadMonitorRows(el); } };
   $("#mo-next", el).onclick = () => { MO.page++; loadMonitorRows(el); };
   $("#mo-csv", el).onclick = async () => {
@@ -365,7 +385,7 @@ async function viewMonitor(el) {
   };
   await loadMonitorRows(el);
 }
-const monParams = () => ({types: MO.types || TYPES.join(","), status: MO.status, offering: MO.offering, q: MO.q,
+const monParams = () => ({types: MO.types || TYPES.join(","), status: MO.status, fin: MO.fin, offering: MO.offering, q: MO.q,
   issue_from: MO.issue_from, issue_to: MO.issue_to, maturity_from: MO.maturity_from, maturity_to: MO.maturity_to, sort: MO.sort});
 const SEC_CSV = [["잔존일수", s => s.days_left], ["만기일", s => s.maturity_date], ["회사", s => s.corp_name], ["종목코드", s => s.stock_code],
   ["유형", s => LABEL[s.sec_type]], ["공모/사모", s => s.offering], ["회차", s => s.series], ["명칭", s => s.name], ["발행일", s => s.issue_date],

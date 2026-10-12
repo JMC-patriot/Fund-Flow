@@ -56,6 +56,12 @@ app.add_middleware(
 )
 
 VALID = "not s.superseded and s.amount > 0"
+# 금융회사(은행·금융지주·증권·카드·캐피탈·보험 등) 판별: 금융채가 일반 기업 지표를 덮지 않도록 기본 제외
+FIN_RE = r"(은행|금융|카드|캐피탈|캐피털|증권|보험|생명$|화재|해상|저축|자산운용|리츠|신탁|파이낸스|종금|여신)"
+FIN = ("(%(fin)s = 'include' or ((s.corp_code in (select corp_code from companies where corp_name ~ %(fin_re)s))"
+       " = (%(fin)s = 'only')))")
+FinQ = Query("exclude", description="금융회사 발행분: exclude 제외(기본) / include 포함 / only 금융회사만")
+SINCE = date(2020, 1, 1)
 OUTSTANDING = ("s.sec_type = any(%(debt)s) and s.maturity_date >= current_date "
                "and coalesce(s.repaid, '') <> '상환'")
 
@@ -130,31 +136,34 @@ def sources():
 def macro(unit: Literal["year", "month"] = Query("year", description="집계 단위"),
           types: Optional[str] = TypesQ,
           start: Optional[str] = Query(None, description="시작 연월 YYYY-MM", examples=["2020-01"]),
-          end: Optional[str] = Query(None, description="끝 연월 YYYY-MM (포함)", examples=["2026-10"])):
+          end: Optional[str] = Query(None, description="끝 연월 YYYY-MM (포함)", examples=["2026-10"]),
+          fin: Literal["exclude", "include", "only"] = FinQ):
+    """2020년 이후 발행분 집계 (정기보고서에 함께 실린 그 이전 발행분 제외)."""
     fmt = "YYYY" if unit == "year" else "YYYY-MM"
     return fetch_all(f"""
         select to_char(issue_date, '{fmt}') as period, sec_type, sum(amount) as amount,
                count(*) as count, count(distinct corp_code) as companies
         from securities s
-        where {VALID} and issue_date is not null and issue_date <= current_date
-          and sec_type = any(%(types)s)
+        where {VALID} and issue_date >= %(since)s and issue_date <= current_date
+          and sec_type = any(%(types)s) and {FIN}
           and (%(s)s::date is null or issue_date >= %(s)s) and (%(e)s::date is null or issue_date < %(e)s)
         group by 1, 2 order by 1, 2""",
-        {"types": types_param(types), "s": month_start(start), "e": month_end(end)})
+        {"types": types_param(types), "s": month_start(start), "e": month_end(end),
+         "since": SINCE, "fin": fin, "fin_re": FIN_RE})
 
 
 @app.get("/api/maturities", response_model=list[MaturityBucket], tags=["macro"],
          summary="잔존 채무증권의 만기 분포")
-def maturities(types: Optional[str] = TypesQ):
+def maturities(types: Optional[str] = TypesQ, fin: Literal["exclude", "include", "only"] = FinQ):
     """오늘 기준 잔존만기 구간별 금액. 상환 완료로 확인된 증권은 제외합니다."""
     return fetch_all(f"""
         select case when d <= 90 then '0-3m' when d <= 182 then '3-6m' when d <= 365 then '6-12m'
                     when d <= 730 then '1-2y' when d <= 1095 then '2-3y' else '3y+' end as bucket,
                sec_type, sum(amount) as amount, count(*) as count
         from (select s.*, s.maturity_date - current_date as d from securities s
-              where {VALID} and {OUTSTANDING} and s.sec_type = any(%(types)s)) s
+              where {VALID} and {OUTSTANDING} and s.sec_type = any(%(types)s) and {FIN}) s
         group by 1, 2""",
-        {"debt": DEBT, "types": [t for t in types_param(types) if t in DEBT]})
+        {"debt": DEBT, "types": [t for t in types_param(types) if t in DEBT], "fin": fin, "fin_re": FIN_RE})
 
 
 # ── monitor ────────────────────────────────────────────────────────────
@@ -184,8 +193,10 @@ def securities(types: Optional[str] = TypesQ,
                maturity_from: Optional[str] = Query(None, description="만기 연월 시작 YYYY-MM"),
                maturity_to: Optional[str] = Query(None, description="만기 연월 끝 YYYY-MM (포함)"),
                sort: Literal["maturity", "issue", "amount", "coupon"] = Query("maturity"),
+               fin: Literal["exclude", "include", "only"] = Query(
+                   "include", description="금융회사 발행분: include 포함(기본) / exclude 제외 / only 금융회사만"),
                limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
-    where = f"""{VALID} and s.sec_type = any(%(types)s)
+    where = f"""{VALID} and s.sec_type = any(%(types)s) and {FIN}
       and (%(status)s = 'all' or ({OUTSTANDING}))
       and (%(off)s::text is null or s.offering = %(off)s)
       and (%(corp)s::text is null or s.corp_code = %(corp)s)
@@ -196,7 +207,7 @@ def securities(types: Optional[str] = TypesQ,
          "corp": corp_code, "q": (q or "").strip() or None,
          "i1": month_start(issue_from), "i2": month_end(issue_to),
          "m1": month_start(maturity_from), "m2": month_end(maturity_to),
-         "limit": limit, "offset": offset}
+         "fin": fin, "fin_re": FIN_RE, "limit": limit, "offset": offset}
     agg = fetch_one(f"""select count(*) as n, coalesce(sum(s.amount), 0) as amt
                         from securities s join companies c using (corp_code) where {where}""", p)
     items = fetch_all(f"""select {SEC_COLS} from securities s join companies c using (corp_code)

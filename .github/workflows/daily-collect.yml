@@ -1,16 +1,17 @@
-# 매일 DART 공시를 수집해 Supabase에 반영
+# DART 공시를 3시간마다 수집해 Supabase에 반영
+# DART 일일 한도(020)에 걸리면 그날은 거기서 멈추고, 한도가 리셋된 뒤 다음 실행이 이어받음
 # 필요 Secrets (GitHub 저장소 > Settings > Secrets and variables > Actions):
 #   DART_API_KEY, DATABASE_URL
 name: daily-collect
 
 on:
   schedule:
-    - cron: "0 19 * * *"        # 매일 04:00 KST (UTC 19:00)
+    - cron: "17 */3 * * *"      # 3시간마다 (정각 혼잡을 피해 17분)
   workflow_dispatch:             # Actions 탭에서 수동 실행
     inputs:
       budget:
-        description: "DART 호출 예산"
-        default: "18000"
+        description: "DART 호출 예산 (기본: 일일 한도까지)"
+        default: "100000"
 
 concurrency:
   group: collect
@@ -31,5 +32,5 @@ jobs:
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DART_BUDGET: ${{ github.event.inputs.budget || '18000' }}
+          DART_BUDGET: ${{ github.event.inputs.budget || '100000' }}
         run: python collector/run.py

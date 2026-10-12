@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: fundflow-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL       # Supabase > Connect > Session pooler 문자열
+        sync: false
+      - key: CORS_ORIGINS       # 예: https://fundflow.vercel.app (쉼표로 여러 개)
+        value: "*"

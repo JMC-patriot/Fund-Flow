@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fundflow 자금조달</title>
+<script src="config.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f4f4f2; --surface:#fcfcfb; --line:#e4e3df; --track:#ecebe7;
+  --text:#0b0b0b; --text-2:#52514e; --muted:#7a7974;
+  --equity:#2a78d6; --debt:#eb6834; --accent:#2a78d6; --sel:#eef4fc;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121211; --surface:#1a1a19; --line:#2c2c2a; --track:#262624;
+    --text:#f0efec; --text-2:#c3c2b7; --muted:#8f8e86;
+    --equity:#3987e5; --debt:#d95926; --accent:#6da7ec; --sel:#1d2733;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121211; --surface:#1a1a19; --line:#2c2c2a; --track:#262624;
+  --text:#f0efec; --text-2:#c3c2b7; --muted:#8f8e86;
+  --equity:#3987e5; --debt:#d95926; --accent:#6da7ec; --sel:#1d2733;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);overflow:hidden;
+  font-family:"IBM Plex Sans KR",-apple-system,"Apple SD Gothic Neo",sans-serif;
+  font-feature-settings:"tnum";line-height:1.45;word-break:keep-all}
+.deck{position:relative;height:calc(100% - 56px)}
+.slide{position:absolute;inset:0;padding:40px 48px 24px;overflow-y:auto;
+  opacity:0;visibility:hidden;transform:translateX(24px);
+  transition:opacity .28s ease,transform .28s ease,visibility 0s .28s}
+.slide.on{opacity:1;visibility:visible;transform:none;transition:opacity .28s ease,transform .28s ease}
+.slide.prev{transform:translateX(-24px)}
+.inner{max-width:1180px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+.eyebrow{font-size:12px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;margin:0 0 8px}
+h1{font-size:34px;font-weight:700;margin:0 0 10px;letter-spacing:-.02em}
+h2{font-size:26px;font-weight:700;margin:0;letter-spacing:-.01em}
+h2 small{font-size:15px;color:var(--muted);font-weight:500;margin-left:8px}
+.lede{color:var(--text-2);font-size:15px;margin:0}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.kpis{display:flex;gap:28px}
+.kpi .v{font-size:20px;font-weight:600}
+.kpi .k{font-size:12px;color:var(--muted)}
+
+/* cover */
+.cover{justify-content:safe center}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:36px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px;
+  cursor:pointer;text-align:left;font:inherit;color:inherit}
+.tile:hover{border-color:var(--accent)}
+.tile .t{font-size:13px;color:var(--text-2)}
+.tile .v{font-size:24px;font-weight:700;margin:6px 0 2px}
+.tile .s{font-size:12px;color:var(--muted)}
+.tile .top3{list-style:none;margin:12px 0 0;padding:0;border-top:1px solid var(--line);font-size:13px}
+.tile .top3 li{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:8px;align-items:baseline;padding:7px 0 0}
+.tile .rk3{color:var(--muted);font-size:12px}
+.tile .nm3{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tile .am3{color:var(--text-2);white-space:nowrap}
+
+/* type slide */
+.body{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:20px;flex:1;min-height:0}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;overflow-x:auto;min-width:0}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{font-size:12px;font-weight:500;color:var(--muted);text-align:right;padding:0 8px 10px;white-space:nowrap}
+th:first-child,th:nth-child(2){text-align:left}
+td{padding:12px 8px;border-top:1px solid var(--line);text-align:right;white-space:nowrap}
+td.rk{color:var(--muted);width:20px;text-align:left;padding-right:0}
+td.nm{text-align:left;font-weight:500;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+tbody tr{cursor:pointer}
+tbody tr:hover td{background:var(--sel)}
+tbody tr.sel td{background:var(--sel)}
+tbody tr.sel td.nm{color:var(--accent)}
+.amt{font-weight:600}
+.pct{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end}
+.minibar{width:56px;height:6px;background:var(--track);border-radius:0 3px 3px 0;overflow:hidden}
+.minibar i{display:block;height:100%;background:var(--equity);border-radius:0 3px 3px 0}
+.arrow{color:var(--muted);margin:0 3px}
+.na{color:var(--muted)}
+.note{font-size:12px;color:var(--muted);margin:12px 0 0}
+
+/* detail */
+.d-h{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+.d-h h3{font-size:18px;margin:0}
+.d-h a{font-size:12px;color:var(--accent)}
+.d-base{font-size:12px;color:var(--muted);margin:2px 0 14px}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--text-2);margin-bottom:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+svg text{font-family:inherit}
+.rt{width:100%;font-size:13px;margin-top:10px}
+.rt td{padding:7px 6px}
+.rt td:first-child{text-align:left;color:var(--text-2)}
+.rt thead th{text-align:right}
+.rt thead th:first-child{text-align:left}
+
+/* method */
+.method{max-width:820px}
+.method dl{display:grid;grid-template-columns:150px 1fr;gap:14px 20px;margin:24px 0 0;font-size:14px}
+.method dt{color:var(--muted)}
+.method dd{margin:0}
+.method code{font-size:13px;background:var(--track);padding:1px 5px;border-radius:4px}
+
+/* nav */
+nav{height:56px;display:flex;align-items:center;justify-content:center;gap:16px;
+  border-top:1px solid var(--line);background:var(--surface)}
+nav button{font:inherit;background:none;border:1px solid var(--line);color:var(--text);
+  width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:16px}
+nav button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+nav button:disabled{opacity:.35;cursor:default}
+.dots{display:flex;gap:7px}
+.dots span{width:7px;height:7px;border-radius:50%;background:var(--line);cursor:pointer}
+.dots span.on{background:var(--accent);width:20px;border-radius:4px}
+.count{font-size:12px;color:var(--muted);min-width:44px;text-align:center}
+.tip{position:fixed;pointer-events:none;background:var(--text);color:var(--surface);
+  font-size:12px;padding:6px 9px;border-radius:6px;opacity:0;transition:opacity .1s;z-index:9;white-space:nowrap}
+
+@media (max-width:900px){
+  .slide{padding:24px 16px 16px}
+  .body{grid-template-columns:1fr}
+  .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  h1{font-size:26px} h2{font-size:21px}
+  .kpis{gap:18px}
+  .hide-m{display:none}
+  td,th{padding-left:5px;padding-right:5px}
+  .method dl{grid-template-columns:1fr;gap:4px}
+  .method dd{margin-bottom:10px}
+}
+@media (max-width:600px){.tiles{grid-template-columns:1fr}}
+.flow{margin:0;padding-left:20px;font-size:14px;color:var(--text-2)}
+.flow li{margin:0 0 10px}
+.flow b{color:var(--text);font-weight:600;margin-right:6px}
+code{font-size:12.5px;background:var(--track);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="deck" id="deck"></div>
+<nav>
+  <button id="prev" aria-label="이전">‹</button>
+  <div class="dots" id="dots"></div>
+  <span class="count" id="count"></span>
+  <button id="next" aria-label="다음">›</button>
+</nav>
+<div class="tip" id="tip"></div>
+<script>
+const $ = s => document.querySelector(s);
+
+function render(DATA) {
+
+function monthlyChart(rows) {
+  const months = [...new Set(rows.map(r => r.month))].sort();
+  if (!months.length) return '<p class="na">데이터 없음</p>';
+  const by = {}; rows.forEach(r => { (by[r.month] ||= {})[r.ftype] = r; });
+  const tot = months.map(m => Object.values(by[m]).reduce((a, r) => a + r.total_amount, 0));
+  const W = 520, H = 230, pb = 26, pt = 14, pl = 6;
+  const max = Math.max(...tot), step = (W - pl) / months.length, bw = Math.max(4, step * 0.62);
+  let g = `<line x1="0" x2="${W}" y1="${H - pb}" y2="${H - pb}" stroke="var(--line)"/>`;
+  months.forEach((m, i) => {
+    const h = tot[i] / max * (H - pb - pt), x = pl + step * i + (step - bw) / 2, y = H - pb - h;
+    const det = ["CB","BW","EB","Equity"].filter(t => by[m][t]).map(t => `${t} ${won(by[m][t].total_amount)} (${by[m][t].events}건)`).join(" · ");
+    g += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="var(--equity)" data-tip="${esc(m + " 합계 " + won(tot[i]) + " — " + det)}"/>`;
+    g += `<rect x="${x - (step - bw) / 2}" y="${pt}" width="${step}" height="${H - pb - pt}" fill="transparent" data-tip="${esc(m + " 합계 " + won(tot[i]) + " — " + det)}"/>`;
+    if (months.length <= 14 || i % 3 === 0) g += `<text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${m.slice(2).replace("-", ".")}</text>`;
+  });
+  const mi = tot.indexOf(max);
+  g += `<text x="${pl + step * mi + step / 2}" y="${pt - 2}" text-anchor="middle" font-size="11" fill="var(--text-2)">${won(max)}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="월별 발행금액">${g}</svg>`;
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const won = v => {
+  if (v == null || isNaN(v)) return "–";
+  const eok = v / 1e8, a = Math.abs(eok);
+  if (a >= 10000) return (eok / 10000).toLocaleString("ko-KR", {maximumFractionDigits: 2}) + "조원";
+  return Math.round(eok).toLocaleString("ko-KR") + "억원";
+};
+const pct = (v, d = 1) => v == null || isNaN(v) ? "–" : v.toFixed(d) + "%";
+const ratio = v => v == null ? '<span class="na">자본잠식</span>' : Math.round(v).toLocaleString() + "%";
+const dart = r => `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${r}`;
+
+/* ---------- slides ---------- */
+const slides = [];
+
+slides.push(`<div class="inner cover">
+  <p class="eyebrow">DART 주요사항보고서 · ${esc(DATA.period)}</p>
+  <h1>상장사 자금조달, 누가 얼마나<br>그리고 재무구조는 어떻게 바뀌나</h1>
+  <p class="lede">발행 유형별 조달 금액 상위 5개사와, 각 발행이 자기자본·부채비율에 주는 영향</p>
+  <div class="tiles">${DATA.slides.map((s, i) => `
+    <button class="tile" data-go="${i + 3}">
+      <div class="t">${esc(s.label)} · ${esc(s.code)}</div>
+      <div class="v">${won(s.total)}</div>
+      <div class="s">${s.count.toLocaleString()}건 · ${s.corps.toLocaleString()}개사</div>
+      <ol class="top3">${s.top.length ? s.top.slice(0, 3).map((r, k) => `<li><span class="rk3">${k + 1}</span><span class="nm3">${esc(r.name)}</span><span class="am3">${won(r.total)}</span></li>`).join("") : '<li class="na">발행 없음</li>'}</ol>
+    </button>`).join("")}
+  </div>
+</div>`);
+
+/* 데이터와 출처 (필수 페이지) */
+slides.push(`<div class="inner">
+  <div class="head"><div><p class="eyebrow">데이터</p><h2>수집 데이터와 출처</h2></div>
+    <div class="kpis">
+      <div class="kpi"><div class="v">${DATA.totalEvents.toLocaleString()}건</div><div class="k">공시 이벤트</div></div>
+      <div class="kpi"><div class="v">${DATA.totalCorps.toLocaleString()}개사</div><div class="k">발행 회사 (유형별 합)</div></div>
+      <div class="kpi"><div class="v">${won(DATA.totalAmount)}</div><div class="k">총 발행금액</div></div>
+    </div></div>
+  <div class="body">
+    <div class="panel">
+      <table><thead><tr><th>데이터</th><th>API</th><th class="hide-m" style="text-align:left">활용 항목</th></tr></thead>
+      <tbody>${DATA.sources.map(s => `<tr style="cursor:default"><td class="nm" style="max-width:none">${esc(s.name)}</td>
+        <td style="text-align:left"><code>${esc(s.api)}</code></td><td class="hide-m" style="text-align:left;white-space:normal;color:var(--text-2)">${esc(s.fields)}</td></tr>`).join("")}</tbody></table>
+      <p class="note">제공 기관: 금융감독원 · 출처: <a href="https://opendart.fss.or.kr" target="_blank" rel="noopener" style="color:var(--accent)">DART OpenAPI (opendart.fss.or.kr)</a></p>
+    </div>
+    <div class="panel">
+      <h3 style="margin:0 0 10px;font-size:16px">수집·가공 흐름</h3>
+      <ol class="flow">
+        <li><b>대상 선별</b> 기간 내 주요사항보고서 목록(<code>list</code>)에서 CB·BW·EB·유상증자 결정 공시를 낸 상장사만 추림</li>
+        <li><b>상세 수집</b> 유형별 발행결정 API로 발행금액·가격·이자율·신주 수 수집</li>
+        <li><b>정제</b> 금액 숫자화, 정정공시는 최종본만 유효 처리, 희석률 계산</li>
+        <li><b>재무 결합</b> 발행일 직전에 공시된 재무제표(<code>fnlttSinglAcnt</code>)의 자산·부채·자본총계 결합</li>
+        <li><b>저장·제공</b> PostgreSQL(Supabase) 적재 → FastAPI로 분석 결과 제공</li>
+      </ol>
+      <p class="note">조회 기간 ${esc(DATA.period)}</p>
+    </div>
+  </div>
+</div>`);
+
+/* 기초 분석 */
+slides.push(`<div class="inner">
+  <div class="head"><div><p class="eyebrow">기초 분석</p><h2>월별 발행 추이와 유형별 통계</h2></div></div>
+  <div class="body">
+    <div class="panel">
+      <h3 style="margin:0 0 4px;font-size:16px">월별 발행금액 (전 유형 합계)</h3>
+      <p class="note" style="margin:0 0 8px">막대에 마우스를 올리면 유형별 내역이 보입니다.</p>
+      ${monthlyChart(DATA.monthly)}
+    </div>
+    <div class="panel">
+      <table><thead><tr><th></th><th>유형</th><th>건수</th><th>총액</th><th>평균</th><th class="hide-m">평균 희석률</th></tr></thead>
+      <tbody>${DATA.summary.map((s, i) => `<tr data-go="${i + 3}"><td class="rk">${esc(s.ftype)}</td><td class="nm">${esc(s.label)}</td>
+        <td>${s.events.toLocaleString()}</td><td class="amt">${won(s.total_amount)}</td><td>${won(s.avg_amount)}</td>
+        <td class="hide-m">${pct(s.avg_dilution_pct, 2)}</td></tr>`).join("")}</tbody></table>
+      <p class="note">행을 누르면 해당 유형의 상위 5개사 슬라이드로 이동합니다. 평균 희석률은 발행 전 주식총수 대비 신주 비율의 평균.</p>
+    </div>
+  </div>
+</div>`);
+
+DATA.slides.forEach((s, si) => {
+  const maxVs = Math.max(1, ...s.top.map(r => r.vs_equity || 0));
+  const rows = s.top.map((r, i) => {
+    const sc = r.sc;
+    const dr = sc ? `${ratio(sc[0].debt_ratio)}<span class="arrow">→</span>${ratio(sc[1].debt_ratio)}` : '<span class="na">–</span>';
+    return `<tr data-i="${i}">
+      <td class="rk">${i + 1}</td>
+      <td class="nm">${esc(r.name)}</td>
+      <td class="amt">${won(r.total)}</td>
+      <td><span class="pct">${r.vs_equity != null ? `<span class="minibar hide-m"><i style="width:${Math.min(100, r.vs_equity / maxVs * 100)}%"></i></span>` : ""}${r.vs_equity != null ? pct(r.vs_equity) : (r.bs ? '<span class="na">자본잠식</span>' : '–')}</span></td>
+      <td>${dr}</td>
+      <td class="hide-m">${pct(r.dilution, 2)}</td>
+    </tr>`;
+  }).join("");
+  slides.push(`<div class="inner" data-type="${si}">
+    <div class="head">
+      <div><p class="eyebrow">${si + 1} / ${DATA.slides.length} · 발행 유형</p>
+        <h2>${esc(s.label)}<small>${esc(s.code)}</small></h2></div>
+      <div class="kpis">
+        <div class="kpi"><div class="v">${won(s.total)}</div><div class="k">총 발행금액</div></div>
+        <div class="kpi"><div class="v">${s.count.toLocaleString()}건</div><div class="k">${s.corps.toLocaleString()}개사</div></div>
+      </div>
+    </div>
+    <div class="body">
+      <div class="panel">
+        ${s.top.length ? `<table>
+          <thead><tr><th></th><th>회사</th><th>발행금액</th><th>자기자본 대비</th>
+            <th>부채비율 (전→${s.code === "Equity" ? "후" : "직후"})</th><th class="hide-m">희석률</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+          <p class="note">행을 누르면 오른쪽에 재무상태표 변화가 표시됩니다. 희석률은 발행 전 주식총수 대비 신주 비율.</p>`
+        : '<p class="na">해당 기간 발행 없음</p>'}
+      </div>
+      <div class="panel detail"></div>
+    </div>
+  </div>`);
+});
+
+slides.push(`<div class="inner method">
+  <p class="eyebrow">부록</p>
+  <h2>계산 기준과 가정</h2>
+  <dl>
+    <dt>발행금액</dt><dd>사채는 권면총액(<code>bd_fta</code>), 유상증자는 자금조달 목적별 금액 합계. 같은 회사의 같은 유형 발행은 합산.</dd>
+    <dt>정정공시</dt><dd>같은 회사·유형·이사회결의일(유상증자는 신주 수) 기준으로 마지막 접수본만 반영.</dd>
+    <dt>자기자본</dt><dd>해당 회사의 최대 규모 발행 공시일 이전에 공시된 가장 최근 재무제표의 자본총계. 연결 우선, 없으면 별도.</dd>
+    <dt>발행 직후</dt><dd>조달 현금이 자산으로 유입되고 사채만큼 부채 증가 (자산 +X, 부채 +X).</dd>
+    <dt>전환·교환 후</dt><dd>CB 전액 전환, EB 전액 교환(자기주식 처분) 시 부채가 자본으로 이동 (부채 −X, 자본 +X).</dd>
+    <dt>행사 후</dt><dd>BW 신주인수권 전액 현금 행사 시 사채는 남고 행사대금만큼 자산·자본 증가.</dd>
+    <dt>제외한 요소</dt><dd>발행비용, 파생상품부채 분리, 이자비용, 발행 이후 영업 실적 변화. 비율은 방향과 규모를 보는 추정치입니다.</dd>
+    <dt>출처</dt><dd>금융감독원 DART OpenAPI (https://opendart.fss.or.kr)</dd>
+    <dt>API 문서</dt><dd><a href="${esc(API)}/docs" target="_blank" rel="noopener" style="color:var(--accent)">Swagger UI ↗</a> · 조회 ${esc(DATA.generated)}</dd>
+  </dl>
+</div>`);
+
+$("#deck").innerHTML = slides.map((h, i) => `<section class="slide" data-n="${i}">${h}</section>`).join("");
+$("#dots").innerHTML = slides.map((_, i) => `<span data-go="${i}" title="${i + 1}"></span>`).join("");
+
+/* ---------- detail panel ---------- */
+const tip = $("#tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.opacity = 1;
+  tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = (e.clientY - 36) + "px"; }
+function hideTip() { tip.style.opacity = 0; }
+
+function bsChart(sc) {
+  const W = 420, H = 210, padB = 22, padT = 18, n = sc.length;
+  const max = Math.max(...sc.map(s => Math.max(s.A, s.L + Math.max(0, s.E))));
+  const y = v => (v / max) * (H - padB - padT);
+  const bw = Math.min(72, W / n * 0.42), gap = W / n;
+  let g = "";
+  sc.forEach((s, i) => {
+    const x = gap * i + (gap - bw) / 2, base = H - padB;
+    const hL = y(s.L), hE = y(Math.max(0, s.E));
+    const tipL = `${s.label} · 부채 ${won(s.L)}`, tipE = `${s.label} · 자본 ${won(s.E)}`;
+    g += `<rect x="${x}" y="${base - hL}" width="${bw}" height="${hL}" rx="0" fill="var(--debt)" data-tip="${esc(tipL)}"/>`;
+    if (hE > 0) g += `<path d="M${x},${base - hL - 2} v${-(hE - 4)} a4,4 0 0 1 4,-4 h${bw - 8} a4,4 0 0 1 4,4 v${hE - 4} z" fill="var(--equity)" data-tip="${esc(tipE)}"/>`;
+    g += `<text x="${x + bw / 2}" y="${base - hL - hE - 6}" text-anchor="middle" font-size="11" fill="var(--text-2)">${won(s.A)}</text>`;
+    g += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="12" fill="var(--text)">${esc(s.label)}</text>`;
+  });
+  g += `<line x1="0" x2="${W}" y1="${H - padB}" y2="${H - padB}" stroke="var(--line)"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="재무상태표 전후 비교">${g}</svg>`;
+}
+
+function renderDetail(slideEl, si, i) {
+  const r = DATA.slides[si].top[i], p = slideEl.querySelector(".detail");
+  slideEl.querySelectorAll("tbody tr").forEach(tr => tr.classList.toggle("sel", +tr.dataset.i === i));
+  if (!r) { p.innerHTML = ""; return; }
+  const head = `<div class="d-h"><h3>${esc(r.name)}</h3><a href="${dart(r.rcp)}" target="_blank" rel="noopener">공시 원문 ↗</a></div>`;
+  if (!r.sc) {
+    p.innerHTML = head + `<p class="d-base">${r.n}건 · 최근 공시 ${esc(r.last)}</p>
+      <p class="na">${DATA.offline ? "재무 데이터를 조회하지 않고 생성했습니다 (--offline)." : "발행 직전 재무제표를 찾지 못했습니다."}</p>`;
+    return;
+  }
+  const sc = r.sc;
+  p.innerHTML = head + `
+    <p class="d-base">발행 ${won(r.total)} (${r.n}건) · 기준 ${esc(r.bs.base)} ${esc(r.bs.base_dt)}</p>
+    <div class="legend"><span><i style="background:var(--debt)"></i>부채</span><span><i style="background:var(--equity)"></i>자본</span><span class="na">막대 위 숫자 = 자산총계</span></div>
+    ${bsChart(sc)}
+    <table class="rt">
+      <thead><tr><th></th>${sc.map(s => `<th>${esc(s.label)}</th>`).join("")}</tr></thead>
+      <tbody>
+        <tr><td>부채비율</td>${sc.map(s => `<td>${ratio(s.debt_ratio)}</td>`).join("")}</tr>
+        <tr><td>자기자본비율</td>${sc.map(s => `<td>${pct(s.equity_ratio)}</td>`).join("")}</tr>
+        <tr><td>자기자본</td>${sc.map(s => `<td>${won(s.E)}</td>`).join("")}</tr>
+      </tbody>
+    </table>`;
+  p.querySelectorAll("[data-tip]").forEach(el => {
+    el.addEventListener("mousemove", e => showTip(e, el.dataset.tip));
+    el.addEventListener("mouseleave", hideTip);
+  });
+}
+
+document.querySelectorAll("[data-type]").forEach(el => {
+  const si = +el.dataset.type;
+  renderDetail(el, si, 0);
+  el.querySelectorAll("tbody tr").forEach(tr =>
+    tr.addEventListener("click", () => renderDetail(el, si, +tr.dataset.i)));
+});
+
+/* ---------- navigation ---------- */
+const secs = [...document.querySelectorAll(".slide")];
+let cur = -1;
+function go(n) {
+  n = Math.max(0, Math.min(secs.length - 1, n));
+  if (n === cur) return;
+  secs.forEach((s, i) => { s.classList.toggle("on", i === n); s.classList.toggle("prev", i < n); });
+  document.querySelectorAll(".dots span").forEach((d, i) => d.classList.toggle("on", i === n));
+  $("#count").textContent = `${n + 1} / ${secs.length}`;
+  $("#prev").disabled = n === 0; $("#next").disabled = n === secs.length - 1;
+  cur = n; hideTip();
+  history.replaceState(null, "", "#" + (n + 1));
+}
+$("#prev").onclick = () => go(cur - 1);
+$("#next").onclick = () => go(cur + 1);
+document.addEventListener("click", e => { const t = e.target.closest("[data-go]"); if (t) go(+t.dataset.go); });
+document.addEventListener("keydown", e => {
+  if (["ArrowRight", "PageDown", " "].includes(e.key)) { e.preventDefault(); go(cur + 1); }
+  if (["ArrowLeft", "PageUp"].includes(e.key)) { e.preventDefault(); go(cur - 1); }
+  if (e.key === "Home") go(0);
+  if (e.key === "End") go(secs.length - 1);
+});
+let sx = null;
+document.addEventListener("touchstart", e => sx = e.touches[0].clientX, {passive: true});
+document.addEventListener("touchend", e => {
+  if (sx == null) return; const dx = e.changedTouches[0].clientX - sx;
+  if (Math.abs(dx) > 50) go(cur + (dx < 0 ? 1 : -1)); sx = null;
+});
+go((parseInt(location.hash.slice(1)) || 1) - 1);
+addEventListener("hashchange", () => go((parseInt(location.hash.slice(1)) || 1) - 1));
+
+}
+
+const API = (window.FUNDFLOW_API || "http://localhost:8000").replace(/\/$/, "");
+const TYPES = ["CB", "BW", "EB", "Equity"];
+const d8 = s => s ? s.replaceAll("-", ".") : "";
+
+async function load() {
+  const j = p => fetch(API + p).then(r => { if (!r.ok) throw new Error(p + " " + r.status); return r.json(); });
+  const [summary, monthly, sources, ...ranks] = await Promise.all([
+    j("/api/summary"), j("/api/stats/monthly"), j("/api/sources"),
+    ...TYPES.map(t => j(`/api/rankings?ftype=${t}&limit=5`))]);
+  const firsts = summary.map(s => s.first_dt).filter(Boolean).sort();
+  const lasts = summary.map(s => s.last_dt).filter(Boolean).sort();
+  return {
+    period: firsts.length ? `${d8(firsts[0])} – ${d8(lasts.at(-1))}` : "",
+    generated: new Date().toLocaleString("ko-KR"),
+    offline: false, summary, monthly, sources,
+    totalEvents: summary.reduce((a, s) => a + s.events, 0),
+    totalCorps: summary.reduce((a, s) => a + s.companies, 0),
+    totalAmount: summary.reduce((a, s) => a + s.total_amount, 0),
+    slides: TYPES.map((t, i) => {
+      const s = summary.find(x => x.ftype === t);
+      return {code: t, label: s.label, total: s.total_amount, count: s.events, corps: s.companies,
+        top: ranks[i].map(r => ({
+          name: r.corp_name, total: r.total_amount, n: r.events, dilution: r.dilution_pct,
+          last: d8(r.last_rcept_dt), rcp: r.main_rcept_no, vs_equity: r.amount_to_equity_pct,
+          bs: r.base ? {base: `${r.base.report} (${r.base.fs_div})`, base_dt: d8(r.base.base_date)} : null,
+          sc: r.scenarios ? r.scenarios.map(x => ({label: x.label, A: x.total_assets, L: x.total_liabilities,
+            E: x.total_equity, debt_ratio: x.debt_ratio, equity_ratio: x.equity_ratio})) : null }))};
+    }),
+  };
+}
+
+document.getElementById("deck").innerHTML = '<section class="slide on"><div class="inner cover"><p class="lede">데이터를 불러오는 중…</p></div></section>';
+load().then(render).catch(e => {
+  document.getElementById("deck").innerHTML = `<section class="slide on"><div class="inner cover">
+    <h2>데이터를 불러오지 못했습니다</h2><p class="lede" style="margin-top:8px">API 서버(${API})에 연결할 수 없습니다. 무료 서버는 처음 요청 시 깨어나는 데 30~60초 걸릴 수 있으니 잠시 후 새로고침해 주세요.</p>
+    <p class="note">${String(e.message).replace(/</g, "&lt;")}</p></div></section>`;
+});
+</script>
+</body>
+</html>

@@ -36,7 +36,7 @@ class Dart:
                                timeout=timeout)
                 r.raise_for_status()
                 return r
-            except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+            except requests.RequestException as e:          # 연결 끊김·타임아웃·응답 중단 등 전부 재시도
                 wait = 2 ** attempt * 3
                 print(f"  ! {path} 재시도 {attempt + 1}/6 ({type(e).__name__}), {wait}초 대기")
                 self.s.close()

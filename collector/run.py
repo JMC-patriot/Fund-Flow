@@ -163,6 +163,25 @@ def mark(db, rcepts, col="status", val="done"):
     db.q(f"update filings set {col}=%s where rcept_no = any(%s)", (val, list(rcepts)))
 
 
+# ── 상장일 (한국거래소 KIND 상장법인 목록, DART 한도와 무관) ─────────────
+def update_listing_dates(db):
+    import html, requests
+    try:
+        r = requests.get("https://kind.krx.co.kr/corpgeneral/corpList.do",
+                         params={"method": "download", "searchType": "13"}, timeout=60)
+        txt = r.content.decode("euc-kr", errors="replace")
+    except requests.RequestException as e:
+        print(f"  ! 상장일 목록을 받지 못했습니다: {e}")
+        return
+    rows = []
+    for tr in re.findall(r"<tr>(.*?)</tr>", txt, re.S):
+        tds = [html.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+        if len(tds) >= 6 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", tds[5]):
+            rows.append((tds[5], tds[2]))
+    db.many("update companies set listed_on = %s where stock_code = %s", rows)
+    print(f"상장일: {len(rows)}개사 갱신")
+
+
 # ── 2) 결정 공시 ──────────────────────────────────────────────────────
 def fetch_decisions(dart, db):
     groups = defaultdict(list)
@@ -292,12 +311,20 @@ where s.source in ('decision','bond_rs','equity_rs');
 
 update securities set superseded = false where source = 'periodic';
 
--- 지분증권 신고서: 상장사의 공모증자(유상증자 결정 공시가 있거나 주주배정 방식)는 IPO가 아님
+-- 지분증권 신고서 중 IPO가 아닌 것(상장사의 공모증자)은 숨김
+--  · 주주배정 방식이거나
+--  · 신고 시점에 이미 상장돼 있었거나 (KIND 상장일 기준)
+--  · 상장일을 모를 때(상장폐지 등): 같은 시기 유상증자 결정 공시가 있으면
 update securities r set superseded = true
-where r.source = 'equity_rs' and (coalesce(r.method, '') like '%%주주%%' or exists (
-  select 1 from securities d where d.source = 'decision' and d.sec_type in ('EQUITY','RCPS')
-    and not d.superseded and d.amount > 0 and d.corp_code = r.corp_code
-    and abs(d.rcept_dt - r.rcept_dt) <= 120));
+where r.source = 'equity_rs' and (
+  coalesce(r.method, '') like '%%주주%%'
+  or exists (select 1 from companies c where c.corp_code = r.corp_code
+               and c.listed_on is not null and c.listed_on < r.rcept_dt - 10)
+  or (not exists (select 1 from companies c where c.corp_code = r.corp_code
+                    and c.listed_on between r.rcept_dt - 10 and r.rcept_dt + 200)
+      and exists (select 1 from securities d where d.source = 'decision' and d.sec_type in ('EQUITY','RCPS')
+                    and not d.superseded and d.amount > 0 and d.corp_code = r.corp_code
+                    and abs(d.rcept_dt - r.rcept_dt) <= 120)));
 
 -- 반대로 IPO로 남은 건과 같은 시기의 유상증자 결정(상장 전 공모)은 유상증자 집계에서 제외
 update securities d set superseded = true
@@ -350,6 +377,7 @@ def main():
         db.log("fix:ipo_v3")
         print("IPO 보정: 지분증권 신고서 목록(C001)을 따로 훑습니다")
     try:
+        update_listing_dates(db)
         # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)
         scan_lists(dart, db, since, ("B",))
         fetch_decisions(dart, db)

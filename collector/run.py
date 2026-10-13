@@ -18,6 +18,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -69,17 +70,39 @@ def report_year(report_nm: str) -> int:
 # ── DB 도우미 ─────────────────────────────────────────────────────────
 class Store:
     def __init__(self, url):
-        self.con = psycopg.connect(url, autocommit=True, prepare_threshold=None)
+        self.url = url
+        self.con = self._connect()
+
+    def _connect(self):
+        return psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=30)
+
+    def _run(self, fn):
+        """연결이 끊겼으면(네트워크 순단·절전) 다시 연결해서 한 번 더 시도"""
+        for attempt in range(4):
+            try:
+                if self.con.closed:
+                    self.con = self._connect()
+                with self.con.cursor() as cur:
+                    return fn(cur)
+            except psycopg.OperationalError as e:
+                if attempt == 3:
+                    raise
+                print(f"  ! DB 연결 끊김, 재연결 {attempt + 1}/3 ({str(e).splitlines()[0]})")
+                time.sleep(5 * (attempt + 1))
+                try:
+                    self.con.close()
+                except psycopg.Error:
+                    pass
 
     def q(self, sql, params=None):
-        with self.con.cursor() as cur:
+        def go(cur):
             cur.execute(sql, params or ())
             return cur.fetchall() if cur.description else None
+        return self._run(go)
 
     def many(self, sql, rows):
         if rows:
-            with self.con.cursor() as cur:
-                cur.executemany(sql, rows)
+            self._run(lambda cur: cur.executemany(sql, rows))
 
     def done(self, task):
         return bool(self.q("select 1 from fetch_log where task=%s and status='done'", (task,)))

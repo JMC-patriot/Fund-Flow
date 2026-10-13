@@ -288,39 +288,53 @@ def _dart_json(path, **params):
         return {}
 
 
-def _fetch_financials_now(corp_code):
-    """수집기가 아직 재무를 받지 않은 회사: 최근 사업보고서 3개 + 올해 최신 분기를 DART에서 바로 받아 저장"""
-    y = date.today().year
-    plan = [(y, c) for c in ("11014", "11012", "11013")] + [(y - k, "11011") for k in (1, 2, 3)]
-    got_quarter = False
-    for yr, code in plan:
-        if code != "11011" and got_quarter:
+def _fetch_fin_report(corp_code, yr, code) -> bool:
+    """DART 주요계정 보고서 하나를 받아 financials에 저장. 저장했으면 True"""
+    items = _dart_json("fnlttSinglAcnt", corp_code=corp_code, bsns_year=str(yr), reprt_code=code).get("list") or []
+    rows = {}
+    for it in items:
+        col = ACCOUNTS.get((it.get("account_nm") or "").strip())
+        if not col:
             continue
-        items = _dart_json("fnlttSinglAcnt", corp_code=corp_code, bsns_year=str(yr), reprt_code=code).get("list") or []
-        rows = {}
-        for it in items:
-            col = ACCOUNTS.get((it.get("account_nm") or "").strip())
-            if not col:
-                continue
-            r = rows.setdefault(it["fs_div"], {"base_date": None})
-            if it.get("sj_div") == "BS" and not r["base_date"]:
-                d = re.findall(r"\d+", it.get("thstrm_dt") or "")
-                r["base_date"] = date(int(d[0]), int(d[1]), int(d[2])) if len(d) >= 3 else None
-            v = _amt(it.get("thstrm_add_amount")) if it.get("sj_div") == "IS" else None
-            if v is None:
-                v = _amt(it.get("thstrm_amount"))
-            r.setdefault(col, v)
-        for fs, r in rows.items():
-            if not r["base_date"] or r.get("total_assets") is None:
-                continue
-            cols = sorted(set(ACCOUNTS.values()))
-            execute(f"""insert into financials (corp_code, bsns_year, reprt_code, fs_div, base_date, {", ".join(cols)})
-                        values (%(c)s, %(y)s, %(r)s, %(f)s, %(b)s, {", ".join(f"%({k})s" for k in cols)})
-                        on conflict do nothing""",
-                    {"c": corp_code, "y": yr, "r": code, "f": fs, "b": r["base_date"],
-                     **{k: r.get(k) for k in cols}})
-            if code != "11011":
-                got_quarter = True
+        r = rows.setdefault(it["fs_div"], {"base_date": None})
+        if it.get("sj_div") == "BS" and not r["base_date"]:
+            d = re.findall(r"\d+", it.get("thstrm_dt") or "")
+            r["base_date"] = date(int(d[0]), int(d[1]), int(d[2])) if len(d) >= 3 else None
+        v = _amt(it.get("thstrm_add_amount")) if it.get("sj_div") == "IS" else None
+        if v is None:
+            v = _amt(it.get("thstrm_amount"))
+        r.setdefault(col, v)
+    saved = False
+    cols = sorted(set(ACCOUNTS.values()))
+    for fs, r in rows.items():
+        if not r["base_date"] or r.get("total_assets") is None:
+            continue
+        execute(f"""insert into financials (corp_code, bsns_year, reprt_code, fs_div, base_date, {", ".join(cols)})
+                    values (%(c)s, %(y)s, %(r)s, %(f)s, %(b)s, {", ".join(f"%({k})s" for k in cols)})
+                    on conflict do nothing""",
+                {"c": corp_code, "y": yr, "r": code, "f": fs, "b": r["base_date"], **{k: r.get(k) for k in cols}})
+        saved = True
+    return saved
+
+
+def _fetch_financials_now(corp_code):
+    """수집기가 아직 재무를 받지 않은 회사: 올해 최신 분·반기 + 최근 사업보고서 3개를 DART에서 바로 받아 저장"""
+    y = date.today().year
+    for code in ("11014", "11012", "11013"):
+        if _fetch_fin_report(corp_code, y, code):
+            break
+    for k in (1, 2, 3):
+        _fetch_fin_report(corp_code, y - k, "11011")
+
+
+def _once(task) -> bool:
+    """오늘 처음 시도하는 작업이면 기록하고 True (DART 호출을 하루 한 번으로 제한)"""
+    if fetch_one("""select 1 as x from fetch_log where task=%(t)s and fetched_at > now() - interval '1 day'""",
+                 {"t": task}):
+        return False
+    execute("""insert into fetch_log (task, status) values (%(t)s, 'done')
+               on conflict (task) do update set fetched_at = now()""", {"t": task})
+    return True
 
 
 @app.get("/api/companies/{corp_code}/financials", response_model=list[Financial], tags=["company"],
@@ -330,14 +344,17 @@ def financials(corp_code: str):
     q = """select distinct on (bsns_year, reprt_code) * from financials where corp_code=%(c)s
            order by bsns_year, reprt_code, (fs_div='CFS') desc"""
     rows = fetch_all(q, {"c": corp_code})
-    if not rows and fetch_one("select 1 as x from companies where corp_code=%(c)s", {"c": corp_code}) \
-            and not fetch_one("""select 1 as x from fetch_log where task=%(t)s
-                                 and fetched_at > now() - interval '1 day'""", {"t": f"fin_now:{corp_code}"}):
-        _fetch_financials_now(corp_code)          # 하루 한 번만 시도
-        execute("""insert into fetch_log (task, status) values (%(t)s, 'done')
-                   on conflict (task) do update set fetched_at = now()""", {"t": f"fin_now:{corp_code}"})
+    known = fetch_one("select 1 as x from companies where corp_code=%(c)s", {"c": corp_code})
+    if not rows and known and _once(f"fin_now:{corp_code}"):
+        _fetch_financials_now(corp_code)
         rows = fetch_all(q, {"c": corp_code})
     rows.sort(key=lambda r: r["base_date"], reverse=True)
+    # 최신이 분·반기면 전년 동기 보고서도 확보 (비교용)
+    if rows and rows[0]["reprt_code"] != "11011":
+        y, code = rows[0]["bsns_year"] - 1, rows[0]["reprt_code"]
+        if not any(r["bsns_year"] == y and r["reprt_code"] == code for r in rows) \
+                and _once(f"fin_prev:{corp_code}:{y}:{code}") and _fetch_fin_report(corp_code, y, code):
+            rows = sorted(fetch_all(q, {"c": corp_code}), key=lambda r: r["base_date"], reverse=True)
     return [ratios(r) for r in rows]
 
 

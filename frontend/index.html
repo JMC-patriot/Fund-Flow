@@ -453,22 +453,34 @@ async function viewCompany(el, code) {
 
     <div class="grid-eq sec">
       <div class="panel"><h3>요약 재무제표 · 재무지표 추이 (억원)</h3><div class="tbl-wrap" id="co-fin"></div>
-        <p class="note">연결 우선, 없으면 별도. 손익은 연초부터 누적.</p></div>
+        <p class="note">연결 우선, 없으면 별도. 분·반기 손익은 연초부터 누적. YoY: 금액은 증감률, 비율은 %p 차이.</p></div>
       <div class="panel" id="sim"></div>
     </div>
 
     <div class="panel sec" id="fs"></div>
     <div class="panel sec"><h3>전체 발행 이력 (${all.total}건)</h3><div class="tbl-wrap scroll-y"><table>${secTable(all.items, {corp: false})}</table></div></div>`;
 
-  // 재무 추이 표
-  const F = fins.slice(0, 8);
+  // 요약 재무: 최근 분·반기 + 전년동기 + YoY, 이어서 연간 3개년
+  const L0 = fins[0], ann = fins.filter(f => f.reprt_code === "11011").slice(0, 3);
+  const prevQ = L0 && L0.reprt_code !== "11011" ? fins.find(f => f.bsns_year === L0.bsns_year - 1 && f.reprt_code === L0.reprt_code) : null;
+  const F = L0 && L0.reprt_code !== "11011" ? [L0, ...(prevQ ? [prevQ] : []), ...ann] : ann;
+  const qn = L0 && L0.reprt_code !== "11011" ? (prevQ ? 2 : 1) : 0, yoy = qn === 2;
+  const lbl = (f, i) => `${String(f.bsns_year).slice(2)}.${REPORT[f.reprt_code]}${i === 1 && yoy ? " (전년동기)" : ""}`;
+  const shade = i => i < qn ? ' style="background:color-mix(in srgb,var(--sel) 60%,transparent)"' : "";
   const lines = [["자산총계", "total_assets"], ["유동자산", "current_assets"], ["부채총계", "total_liab"], ["유동부채", "current_liab"],
     ["자본총계", "total_equity"], ["매출액", "revenue"], ["영업이익", "op_income"], ["당기순이익", "net_income"]];
   const ratiosL = [["부채비율", "debt_ratio"], ["자기자본비율", "equity_ratio"], ["유동비율", "current_ratio"], ["영업이익률", "op_margin"]];
-  $("#co-fin", el).innerHTML = F.length ? `<table><thead><tr><th class="l"></th>${F.map(f => `<th>${String(f.bsns_year).slice(2)}.${REPORT[f.reprt_code]}</th>`).join("")}</tr></thead><tbody>
-    ${lines.map(([l, k]) => `<tr><td class="l">${l}</td>${F.map(f => `<td>${eok(f[k])}</td>`).join("")}</tr>`).join("")}
-    ${ratiosL.map(([l, k]) => `<tr><td class="l" style="color:var(--accent)">${l}</td>${F.map(f => `<td>${pct(f[k], 1)}</td>`).join("")}</tr>`).join("")}
+  const yoyAmt = (a, b) => a == null || !b ? "–" : `${a >= b ? "+" : ""}${((a - b) / Math.abs(b) * 100).toFixed(1)}%`;
+  const yoyPt = (a, b) => a == null || b == null ? "–" : `${a >= b ? "+" : ""}${(a - b).toFixed(1)}%p`;
+  const yoyCell = (txt, color) => `<td${shade(0)} class="${!color ? "" : txt.startsWith("+") ? "down" : txt.startsWith("-") ? "up" : "na"}">${txt}</td>`;
+  const row = (l, k, fmt, yfn, style = "") => `<tr><td class="l"${style}>${l}</td>${F.map((f, i) => `<td${shade(i)}>${fmt(f[k])}</td>` +
+    (yoy && i === 1 ? yoyCell(yfn(F[0][k], F[1][k]), yfn === yoyAmt) : "")).join("")}</tr>`;
+  $("#co-fin", el).innerHTML = F.length ? `<table><thead><tr><th class="l"></th>${F.map((f, i) => `<th${shade(i)}>${lbl(f, i)}</th>` +
+      (yoy && i === 1 ? `<th${shade(0)}>YoY</th>` : "")).join("")}</tr></thead><tbody>
+    ${lines.map(([l, k]) => row(l, k, eok, yoyAmt)).join("")}
+    ${ratiosL.map(([l, k]) => row(l, k, v => pct(v, 1), yoyPt, ' style="color:var(--accent)"')).join("")}
     </tbody></table>` : '<p class="na">재무 데이터가 아직 수집되지 않았습니다.</p>';
+  if (L0 && L0.reprt_code !== "11011" && !prevQ) $("#co-fin", el).insertAdjacentHTML("afterend", '<p class="note">전년동기 보고서를 찾지 못했습니다.</p>');
 
   renderSim($("#sim", el), fins, out.items);
   renderFS($("#fs", el), code, fins);

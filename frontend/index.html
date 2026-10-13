@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fundflow 자금조달 모니터</title>
+<title>fundflow 발행시장 모니터</title>
 <meta name="description" content="회사채·CB·BW·EB·RCPS·유상증자·IPO 발행 지표, 만기 모니터, 발행사 재무 시뮬레이션">
 <script src="config.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -250,7 +250,7 @@ const M = {unit: "year", year: "", fin: "exclude", types: [...MAIN6], metric: "a
 const YEARS = Array.from({length: new Date().getFullYear() - 2019}, (_, i) => String(new Date().getFullYear() - i));
 async function viewMacro(el) {
   el.innerHTML = `
-    <div><h1>자금조달 Macro 지표</h1><p class="sub" id="m-range">연도별·월별 증권 종류별 발행량과 발행 건수</p></div>
+    <div><h1>발행시장 Overview</h1><p class="sub" id="m-range">연도별·월별 증권 종류별 발행량과 발행 건수</p></div>
     <div class="row sec" style="gap:12px">
       <div class="seg seg-lg" id="m-unit"><button data-u="year">연도별</button><button data-u="month">월별</button></div>
       <label class="field" style="flex-direction:row;align-items:center;gap:6px;font-size:13px">기간

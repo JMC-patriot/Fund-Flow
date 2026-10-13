@@ -96,7 +96,7 @@ h3{font-size:14px;margin:0 0 10px}
 #m-chart [data-period]{cursor:pointer}
 .field{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
 .field input,.field select{height:32px;border:1px solid var(--line);border-radius:7px;background:var(--surface);padding:0 8px;color:var(--text);font-size:13px;min-width:0}
-.field input[type=month]{width:140px}
+.field input[type=month]{width:130px}
 .btn{height:32px;border:1px solid var(--line);background:var(--surface);border-radius:7px;padding:0 12px;cursor:pointer;font-size:13px;white-space:nowrap}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -348,10 +348,10 @@ async function viewMonitor(el) {
       <div class="row" style="margin-top:12px;align-items:flex-end">
         <label class="field">회사<input id="mo-q" placeholder="회사명·종목코드" value="${esc(MO.q)}" style="width:150px"></label>
         <label class="field">공모/사모<select id="mo-off"><option value="">전체</option><option ${MO.offering === "공모" ? "selected" : ""}>공모</option><option ${MO.offering === "사모" ? "selected" : ""}>사모</option></select></label>
-        <label class="field">발행 연월 from<input type="month" id="mo-i1" value="${MO.issue_from}"></label>
-        <label class="field">to<input type="month" id="mo-i2" value="${MO.issue_to}"></label>
-        <label class="field">만기 연월 from<input type="month" id="mo-m1" value="${MO.maturity_from}"></label>
-        <label class="field">to<input type="month" id="mo-m2" value="${MO.maturity_to}"></label>
+        <div class="field" title="발행일이 이 기간에 들어가는 증권만">발행 기간 (연월)
+          <span class="row" style="gap:4px;flex-wrap:nowrap"><input type="month" id="mo-i1" placeholder="2025-01" value="${MO.issue_from}"> ~ <input type="month" id="mo-i2" placeholder="2025-12" value="${MO.issue_to}"></span></div>
+        <div class="field" title="만기일이 이 기간에 들어가는 증권만">만기 기간 (연월)
+          <span class="row" style="gap:4px;flex-wrap:nowrap"><input type="month" id="mo-m1" placeholder="2026-10" value="${MO.maturity_from}"> ~ <input type="month" id="mo-m2" placeholder="2027-03" value="${MO.maturity_to}"></span></div>
         <label class="field">신종자본증권<select id="mo-hyb"><option value="">전체</option><option value="only" ${MO.hybrid === "only" ? "selected" : ""}>신종자본만</option><option value="exclude" ${MO.hybrid === "exclude" ? "selected" : ""}>제외</option></select></label>
         <label class="field">정렬<select id="mo-sort">${[["maturity", "만기 임박"], ["issue", "최근 발행"], ["amount", "발행금액"], ["coupon", "표면금리"]].map(([v, l]) => `<option value="${v}" ${MO.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <button class="btn" id="mo-reset">초기화</button>
@@ -374,7 +374,14 @@ async function viewMonitor(el) {
     const row = e.target.closest("tr[data-corp]");
     if (row && !e.target.closest("a")) location.hash = "#/company/" + row.dataset.corp;
   };
-  const bind = (id, k) => $(id, el).addEventListener("change", e => { MO[k] = e.target.value.trim(); reload(); });
+  // 연월 입력: Safari 등 달력이 없는 브라우저에서 2025 / 202501 / 2025.01 / 20250101 도 받아 YYYY-MM으로 정리
+  const ym = v => { const d = (v.match(/\d+/g) || []).join(""); if (!d) return "";
+    if (d.length < 4) return null; const y = d.slice(0, 4), m = d.length >= 6 ? d.slice(4, 6) : "";
+    return m && (+m < 1 || +m > 12) ? null : m ? `${y}-${m}` : y; };
+  const bind = (id, k) => $(id, el).addEventListener("change", e => {
+    let v = e.target.value.trim();
+    if (/^mo-[im]\d$/.test(e.target.id)) { const n = ym(v); if (n === null) { e.target.setCustomValidity("예: 2025-01"); e.target.reportValidity(); return; } e.target.setCustomValidity(""); v = n; }
+    MO[k] = v; reload(); });
   bind("#mo-off", "offering"); bind("#mo-i1", "issue_from"); bind("#mo-i2", "issue_to");
   bind("#mo-hyb", "hybrid"); bind("#mo-m1", "maturity_from"); bind("#mo-m2", "maturity_to"); bind("#mo-sort", "sort");
   let tq; $("#mo-q", el).addEventListener("input", e => { clearTimeout(tq); tq = setTimeout(() => { MO.q = e.target.value.trim(); MO.page = 0; loadMonitorRows(el); }, 300); });

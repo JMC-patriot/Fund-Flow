@@ -81,19 +81,33 @@ def types_param(types: Optional[str]) -> list[str]:
     return out
 
 
+def _ym(v: str):
+    """'2025', '202501', '2025-01', '2025.01', '20250101' → (2025, 1) / 월이 없으면 (2025, None)"""
+    d = re.findall(r"\d+", v)
+    if len(d) == 1 and len(d[0]) in (6, 8):
+        y, m = int(d[0][:4]), int(d[0][4:6])
+    elif d and len(d[0]) == 4:
+        y, m = int(d[0]), (int(d[1]) if len(d) > 1 else None)
+    else:
+        raise HTTPException(422, f"연월 형식을 알 수 없습니다: {v} (예: 2025-01)")
+    if m is not None and not 1 <= m <= 12:
+        raise HTTPException(422, f"월이 잘못됐습니다: {v}")
+    return y, m
+
+
 def month_start(v: Optional[str]) -> Optional[date]:
-    if not v:
+    if not v or not v.strip():
         return None
-    y, *m = v.split("-")
-    return date(int(y), int(m[0]) if m else 1, 1)
+    y, m = _ym(v)
+    return date(y, m or 1, 1)
 
 
 def month_end(v: Optional[str]) -> Optional[date]:
-    if not v:
+    if not v or not v.strip():
         return None
-    y, *m = v.split("-")
-    y, mm = int(y), int(m[0]) if m else 12
-    return date(y + (mm == 12), mm % 12 + 1, 1)          # 다음 달 1일 (미만 비교)
+    y, m = _ym(v)
+    m = m or 12
+    return date(y + (m == 12), m % 12 + 1, 1)          # 다음 달 1일 (미만 비교)
 
 
 TypesQ = Query(None, description="쉼표로 구분한 유형. 생략하면 전체", examples=["SB,CB,BW"])

@@ -99,14 +99,25 @@ class Store:
               corp_cls=excluded.corp_cls, updated_at=now()""", list(uniq.values()))
 
     def securities(self, rows):
-        rows = [{**r, "raw": Jsonb(r["raw"])} for r in rows if r]
+        rows = [{**r, "raw": Jsonb(r["raw"]),
+                 "amount": abs(r["amount"]) if r.get("amount") is not None else None}  # (1,000) 괄호 표기
+                for r in rows if r]
         cols = parse.COLS
         upd = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("id",))
-        self.many(f"""insert into securities ({", ".join(cols)})
+        sql = f"""insert into securities ({", ".join(cols)})
             values ({", ".join(f"%({c})s" for c in cols)})
             on conflict (id) do update set {upd}, loaded_at=now()
             where securities.repaid_asof is null or excluded.repaid_asof is null
-               or excluded.repaid_asof >= securities.repaid_asof""", rows)
+               or excluded.repaid_asof >= securities.repaid_asof"""
+        try:
+            self.many(sql, rows)
+        except psycopg.Error:
+            # 이상한 행 하나 때문에 수집 전체가 멈추지 않도록: 한 행씩 넣고 실패한 행만 건너뜀
+            for r in rows:
+                try:
+                    self.many(sql, [r])
+                except psycopg.Error as e:
+                    print(f"  ! 건너뜀 {r.get('id')}: {str(e).splitlines()[0]}")
 
 
 # ── 1) 공시 목록 스캔 ─────────────────────────────────────────────────

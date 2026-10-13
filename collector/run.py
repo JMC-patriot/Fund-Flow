@@ -110,7 +110,7 @@ class Store:
 
 
 # ── 1) 공시 목록 스캔 ─────────────────────────────────────────────────
-def scan_lists(dart, db, since: date, types=("B", "C", "A")):
+def list_windows(since: date):
     today = date.today()
     cutoff = today - timedelta(days=RECENT_DAYS)
     windows, s = [], since
@@ -119,15 +119,20 @@ def scan_lists(dart, db, since: date, types=("B", "C", "A")):
         windows.append((s, e, True))
         s = e + timedelta(days=1)
     windows.append((cutoff + timedelta(days=1), today, False))   # 최근 구간: 매번
+    return windows
 
+
+def scan_lists(dart, db, since: date, types=("B", "C", "A")):
+    """types: 공시유형(B/C/A) 또는 상세유형(C001 = 증권신고서 지분증권만, 훨씬 적음)"""
     for ty in types:
-        for s, e, final in windows:
+        flt = {"pblntf_detail_ty": ty} if len(ty) > 1 else {"pblntf_ty": ty}
+        for s, e, final in list_windows(since):
             task = f"list:{ty}:{s:%Y%m%d}:{e:%Y%m%d}"
             if final and db.done(task):
                 continue
             rows, page = [], 1
             while True:
-                j = dart.json("list", bgn_de=f"{s:%Y%m%d}", end_de=f"{e:%Y%m%d}", pblntf_ty=ty,
+                j = dart.json("list", bgn_de=f"{s:%Y%m%d}", end_de=f"{e:%Y%m%d}", **flt,
                               page_no=page, page_count=100)
                 rows += j.get("list", [])
                 if page >= int(j.get("total_page") or 1):
@@ -135,7 +140,7 @@ def scan_lists(dart, db, since: date, types=("B", "C", "A")):
                 page += 1
             keep = []
             for r in rows:
-                kind = classify(r, ty)
+                kind = classify(r, ty[0])
                 if kind:
                     keep.append((r["rcept_no"], r["corp_code"], r["corp_name"], r.get("corp_cls"),
                                  text(r.get("stock_code")), r["report_nm"].strip(),
@@ -180,7 +185,7 @@ def fetch_registrations(dart, db):
     for rc, corp, dt, kind, *_ in pending(db, ("BOND_RS", "EQUITY_RS")):
         groups[(corp, kind)].append((rc, dt))
     print(f"증권신고서: {len(groups)}개 (회사, 유형) 조회")
-    for (corp, kind), fl in groups.items():
+    for (corp, kind), fl in sorted(groups.items(), key=lambda kv: kv[0][1] != "EQUITY_RS"):  # IPO 먼저
         dts = [d for _, d in fl]
         j = dart.json("bdRs" if kind == "BOND_RS" else "estkRs", corp_code=corp,
                       bgn_de=f"{min(dts):%Y%m%d}", end_de=f"{max(dts):%Y%m%d}")
@@ -336,19 +341,21 @@ def main():
     dart = Dart(env["DART_API_KEY"], a.budget)
     db = Store(env["DATABASE_URL"])
     since = date.fromisoformat(a.since)
-    # 1회성 보정: IPO 판별 변경 전에 훑은 발행공시 목록과 지분증권 신고서를 다시 처리
-    if not db.done("fix:ipo_v2"):
-        db.q("delete from fetch_log where task like 'list:C:%%'")
+    # 1회성 보정: 지분증권 신고서는 C001 목록으로 따로 훑고(빠름), 이미 받은 발행공시(C) 목록은 다시 훑지 않음
+    if not db.done("fix:ipo_v3"):
+        for s, e, final in list_windows(since):
+            if final:
+                db.log(f"list:C:{s:%Y%m%d}:{e:%Y%m%d}")
         db.q("update filings set status='pending' where kind='EQUITY_RS'")
-        db.log("fix:ipo_v2")
-        print("IPO 보정: 발행공시 목록을 다시 훑습니다")
+        db.log("fix:ipo_v3")
+        print("IPO 보정: 지분증권 신고서 목록(C001)을 따로 훑습니다")
     try:
         # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)
         scan_lists(dart, db, since, ("B",))
         fetch_decisions(dart, db)
         db.q(DEDUPE_SQL)
         detect_rcps(dart, db)
-        scan_lists(dart, db, since, ("C",))
+        scan_lists(dart, db, since, ("C001", "C"))      # IPO(지분증권 신고서)를 먼저
         fetch_registrations(dart, db)
         db.q(DEDUPE_SQL)
         scan_lists(dart, db, since, ("A",))

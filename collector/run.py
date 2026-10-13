@@ -295,7 +295,7 @@ def fetch_periodic(dart, db, share: int):
 
 
 def fetch_financials(dart, db, share: int):
-    """발행 이력이 있는 회사의 주요 재무 (다중회사 API로 100개사씩)"""
+    """발행 이력이 있는 회사의 주요 재무 (다중회사 API로 50개사씩 — 100개사면 DART가 가끔 오류 페이지를 줌)"""
     stop = dart.calls + share
     db.q("""update filings f set fin_status='skip' where fin_status='pending'
               and kind in ('ANNUAL','HALF','Q1','Q3')
@@ -310,10 +310,10 @@ def fetch_financials(dart, db, share: int):
         batches[(report_year(nm), REPORT_CODE[kind])].append((rc, corp))
     print(f"주요 재무: {len(rows)}건 대기")
     for (y, code), items in sorted(batches.items(), reverse=True):
-        for k in range(0, len(items), 100):
+        for k in range(0, len(items), 50):
             if dart.calls >= stop:
                 return
-            chunk = items[k:k + 100]
+            chunk = items[k:k + 50]
             try:
                 j = dart.json("fnlttMultiAcnt", corp_code=",".join(c for _, c in chunk),
                               bsns_year=str(y), reprt_code=code)

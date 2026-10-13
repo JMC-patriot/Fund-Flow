@@ -3,6 +3,9 @@ services:
     name: fundflow-api
     runtime: python
     rootDir: backend
+    buildFilter:              # API 코드가 바뀔 때만 다시 배포 (수집기·화면 수정은 무시)
+      paths:
+        - backend/**
     plan: free
     region: singapore
     buildCommand: pip install -r requirements.txt

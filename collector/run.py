@@ -330,6 +330,12 @@ def main():
     dart = Dart(env["DART_API_KEY"], a.budget)
     db = Store(env["DATABASE_URL"])
     since = date.fromisoformat(a.since)
+    # 1회성 보정: IPO 판별 변경 전에 훑은 발행공시 목록과 지분증권 신고서를 다시 처리
+    if not db.done("fix:ipo_v2"):
+        db.q("delete from fetch_log where task like 'list:C:%%'")
+        db.q("update filings set status='pending' where kind='EQUITY_RS'")
+        db.log("fix:ipo_v2")
+        print("IPO 보정: 발행공시 목록을 다시 훑습니다")
     try:
         # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)
         scan_lists(dart, db, since, ("B",))

@@ -4,6 +4,7 @@ fundflow API — 2020년 이후 DART 공시 회사의 자금조달 증권(SB·CB
 Swagger UI: /docs   ·   ReDoc: /redoc
 """
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
@@ -62,6 +63,9 @@ FIN = ("(%(fin)s = 'include' or ((s.corp_code in (select corp_code from companie
        " = (%(fin)s = 'only')))")
 FinQ = Query("exclude", description="금융회사 발행분: exclude 제외(기본) / include 포함 / only 금융회사만")
 SINCE = date(2020, 1, 1)
+# 신종자본증권: 명칭(신종자본·영구·조건부자본) 또는 만기 30년 이상
+HYBRID = ("(coalesce(s.name, '') ~ '(신종자본|영구|조건부자본|코코)'"
+          " or coalesce(s.maturity_date - s.issue_date, 0) >= 365 * 29)")
 OUTSTANDING = ("s.sec_type = any(%(debt)s) and s.maturity_date >= current_date "
                "and coalesce(s.repaid, '') <> '상환'")
 
@@ -142,7 +146,9 @@ def macro(unit: Literal["year", "month"] = Query("year", description="집계 단
     fmt = "YYYY" if unit == "year" else "YYYY-MM"
     return fetch_all(f"""
         select to_char(issue_date, '{fmt}') as period, sec_type, sum(amount) as amount,
-               count(*) as count, count(distinct corp_code) as companies
+               count(*) as count, count(distinct corp_code) as companies,
+               coalesce(sum(amount) filter (where {HYBRID}), 0) as hybrid_amount,
+               count(*) filter (where {HYBRID}) as hybrid_count
         from securities s
         where {VALID} and issue_date >= %(since)s and issue_date <= current_date
           and sec_type = any(%(types)s) and {FIN}
@@ -167,10 +173,11 @@ def maturities(types: Optional[str] = TypesQ, fin: Literal["exclude", "include",
 
 
 # ── monitor ────────────────────────────────────────────────────────────
-SEC_COLS = """s.id, s.corp_code, c.corp_name, c.stock_code, c.corp_cls, s.sec_type, s.source,
+SEC_COLS = f"""s.id, s.corp_code, c.corp_name, c.stock_code, c.corp_cls, s.sec_type, s.source,
   s.offering, s.name, s.series, s.rcept_dt, s.issue_date, s.amount, s.coupon, s.ytm,
   s.maturity_date, s.maturity_date - current_date as days_left, s.conv_price, s.refix_floor,
   s.conv_start, s.conv_end, s.underlying, s.shares, s.dilution_pct, s.rating, s.repaid,
+  {HYBRID} as hybrid,
   s.repaid_asof, s.method, s.underwriter,
   case when s.rcept_no is not null then 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' || s.rcept_no end as dart_url"""
 
@@ -195,8 +202,11 @@ def securities(types: Optional[str] = TypesQ,
                sort: Literal["maturity", "issue", "amount", "coupon"] = Query("maturity"),
                fin: Literal["exclude", "include", "only"] = Query(
                    "include", description="금융회사 발행분: include 포함(기본) / exclude 제외 / only 금융회사만"),
+               hybrid: Optional[Literal["only", "exclude"]] = Query(
+                   None, description="신종자본증권: only 신종자본만 / exclude 제외 / 생략 시 전체"),
                limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
     where = f"""{VALID} and s.sec_type = any(%(types)s) and {FIN}
+      and (%(hyb)s::text is null or ({HYBRID}) = (%(hyb)s = 'only'))
       and (%(status)s = 'all' or ({OUTSTANDING}))
       and (%(off)s::text is null or s.offering = %(off)s)
       and (%(corp)s::text is null or s.corp_code = %(corp)s)
@@ -207,7 +217,7 @@ def securities(types: Optional[str] = TypesQ,
          "corp": corp_code, "q": (q or "").strip() or None,
          "i1": month_start(issue_from), "i2": month_end(issue_to),
          "m1": month_start(maturity_from), "m2": month_end(maturity_to),
-         "fin": fin, "fin_re": FIN_RE, "limit": limit, "offset": offset}
+         "fin": fin, "fin_re": FIN_RE, "hyb": hybrid, "limit": limit, "offset": offset}
     agg = fetch_one(f"""select count(*) as n, coalesce(sum(s.amount), 0) as amt
                         from securities s join companies c using (corp_code) where {where}""", p)
     items = fetch_all(f"""select {SEC_COLS} from securities s join companies c using (corp_code)
@@ -257,13 +267,75 @@ def ratios(r: dict) -> dict:
             "op_margin": div(r["op_income"], r["revenue"]) if r["revenue"] else None}
 
 
+ACCOUNTS = {
+    "유동자산": "current_assets", "비유동자산": "noncurrent_assets", "자산총계": "total_assets",
+    "유동부채": "current_liab", "비유동부채": "noncurrent_liab", "부채총계": "total_liab",
+    "자본금": "capital", "이익잉여금": "retained", "자본총계": "total_equity",
+    "매출액": "revenue", "영업수익": "revenue", "영업이익": "op_income", "영업이익(손실)": "op_income",
+    "법인세차감전 순이익": "pretax_income", "법인세비용차감전순이익(손실)": "pretax_income",
+    "당기순이익": "net_income", "당기순이익(손실)": "net_income"}
+
+
+def _dart_json(path, **params):
+    key = (os.getenv("DART_API_KEY") or "").strip()
+    if not key:
+        return {}
+    try:
+        return requests.get(f"https://opendart.fss.or.kr/api/{path}.json", timeout=20,
+                            params={"crtfc_key": key, **params}).json()
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def _fetch_financials_now(corp_code):
+    """수집기가 아직 재무를 받지 않은 회사: 최근 사업보고서 3개 + 올해 최신 분기를 DART에서 바로 받아 저장"""
+    y = date.today().year
+    plan = [(y, c) for c in ("11014", "11012", "11013")] + [(y - k, "11011") for k in (1, 2, 3)]
+    got_quarter = False
+    for yr, code in plan:
+        if code != "11011" and got_quarter:
+            continue
+        items = _dart_json("fnlttSinglAcnt", corp_code=corp_code, bsns_year=str(yr), reprt_code=code).get("list") or []
+        rows = {}
+        for it in items:
+            col = ACCOUNTS.get((it.get("account_nm") or "").strip())
+            if not col:
+                continue
+            r = rows.setdefault(it["fs_div"], {"base_date": None})
+            if it.get("sj_div") == "BS" and not r["base_date"]:
+                d = re.findall(r"\d+", it.get("thstrm_dt") or "")
+                r["base_date"] = date(int(d[0]), int(d[1]), int(d[2])) if len(d) >= 3 else None
+            v = _amt(it.get("thstrm_add_amount")) if it.get("sj_div") == "IS" else None
+            if v is None:
+                v = _amt(it.get("thstrm_amount"))
+            r.setdefault(col, v)
+        for fs, r in rows.items():
+            if not r["base_date"] or r.get("total_assets") is None:
+                continue
+            cols = sorted(set(ACCOUNTS.values()))
+            execute(f"""insert into financials (corp_code, bsns_year, reprt_code, fs_div, base_date, {", ".join(cols)})
+                        values (%(c)s, %(y)s, %(r)s, %(f)s, %(b)s, {", ".join(f"%({k})s" for k in cols)})
+                        on conflict do nothing""",
+                    {"c": corp_code, "y": yr, "r": code, "f": fs, "b": r["base_date"],
+                     **{k: r.get(k) for k in cols}})
+            if code != "11011":
+                got_quarter = True
+
+
 @app.get("/api/companies/{corp_code}/financials", response_model=list[Financial], tags=["company"],
          summary="요약 재무와 재무지표 추이")
 def financials(corp_code: str):
     """보고서별 주요 계정과 부채비율·자기자본비율·유동비율·영업이익률. 연결 우선, 없으면 별도. 최신순."""
-    rows = fetch_all("""
-        select distinct on (bsns_year, reprt_code) * from financials where corp_code=%(c)s
-        order by bsns_year, reprt_code, (fs_div='CFS') desc""", {"c": corp_code})
+    q = """select distinct on (bsns_year, reprt_code) * from financials where corp_code=%(c)s
+           order by bsns_year, reprt_code, (fs_div='CFS') desc"""
+    rows = fetch_all(q, {"c": corp_code})
+    if not rows and fetch_one("select 1 as x from companies where corp_code=%(c)s", {"c": corp_code}) \
+            and not fetch_one("""select 1 as x from fetch_log where task=%(t)s
+                                 and fetched_at > now() - interval '1 day'""", {"t": f"fin_now:{corp_code}"}):
+        _fetch_financials_now(corp_code)          # 하루 한 번만 시도
+        execute("""insert into fetch_log (task, status) values (%(t)s, 'done')
+                   on conflict (task) do update set fetched_at = now()""", {"t": f"fin_now:{corp_code}"})
+        rows = fetch_all(q, {"c": corp_code})
     rows.sort(key=lambda r: r["base_date"], reverse=True)
     return [ratios(r) for r in rows]
 

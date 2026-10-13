@@ -29,6 +29,8 @@ class MacroPoint(BaseModel):
     amount: float
     count: int
     companies: int
+    hybrid_amount: float = Field(0, description="그중 신종자본증권(영구채·조건부자본증권 포함) 금액")
+    hybrid_count: int = 0
 
 
 class Security(BaseModel):
@@ -57,6 +59,7 @@ class Security(BaseModel):
     shares: Optional[float]
     dilution_pct: Optional[float]
     rating: Optional[str]
+    hybrid: bool = Field(False, description="신종자본증권 여부 (신종자본·영구·조건부자본 명칭이거나 만기 30년 이상)")
     repaid: Optional[str] = Field(description="상환 / 미상환 / 일부상환 (정기보고서 기준)")
     repaid_asof: Optional[date]
     method: Optional[str]

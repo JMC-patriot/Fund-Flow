@@ -222,7 +222,7 @@ document.addEventListener("mousemove", e => {
 });
 
 /* ── 공통 차트: 누적 막대 ── */
-function stackedBars(periods, types, val, {W = 720, H = 260, fmt = won, labelEvery} = {}) {
+function stackedBars(periods, types, val, {W = 720, H = 260, fmt = won, labelEvery, extra = () => ""} = {}) {
   if (!periods.length) return '<p class="na">데이터 없음</p>';
   const tot = periods.map(p => types.reduce((a, t) => a + (val(p, t) || 0), 0));
   if (!Math.max(...tot)) return '<p class="na">데이터 없음 (수집 중이면 잠시 후 다시 확인하세요)</p>';
@@ -235,7 +235,7 @@ function stackedBars(periods, types, val, {W = 720, H = 260, fmt = won, labelEve
     const det = types.filter(t => val(p, t)).map(t => `${SHORT[t]} ${fmt(val(p, t))}`).join(" · ");
     types.forEach(t => { const v = val(p, t); if (!v) return; const h = y(v); base -= h;
       g += `<rect x="${x}" y="${base}" width="${bw}" height="${Math.max(h - 1, .6)}" fill="var(--${t})"/>`; });
-    g += `<rect x="${pl + step * i}" y="${pt}" width="${step}" height="${H - pb - pt}" fill="transparent" data-period="${esc(p)}" data-tip="${esc(`${p} 합계 ${fmt(tot[i])} — ${det}`)}"/>`;
+    g += `<rect x="${pl + step * i}" y="${pt}" width="${step}" height="${H - pb - pt}" fill="transparent" data-period="${esc(p)}" data-tip="${esc(`${p} 합계 ${fmt(tot[i])} — ${det}${extra(p)}`)}"/>`;
     if (i % every === 0) g += `<text x="${x + bw / 2}" y="${H - 7}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(p.length > 4 ? p.slice(2).replace("-", ".") : p)}</text>`;
   });
   const mi = tot.indexOf(max);
@@ -290,11 +290,12 @@ async function viewMacro(el) {
   const periods = [...new Set(rows.map(r => r.period))].sort();
   const by = {}; rows.forEach(r => (by[r.period] ||= {})[r.sec_type] = r);
   const val = (p, t) => by[p]?.[t]?.[M.metric] || 0;
+  const hyb = p => M.types.reduce((a, t) => a + (by[p]?.[t]?.[M.metric === "amount" ? "hybrid_amount" : "hybrid_count"] || 0), 0);
   const fmt = M.metric === "amount" ? won : v => n0(v) + "건";
   $("#m-ctitle").innerHTML = `${M.year ? M.year + "년 " : ""}${M.unit === "year" ? "연도별" : "월별"} ${M.metric === "amount" ? "발행금액" : "발행 건수"}` +
     (M.unit === "year" ? ' <span class="na" style="font-weight:400">· 막대를 누르면 그해 월별로</span>' : M.year ? ' <a href="#/macro" id="m-all" style="font-weight:400;font-size:12px">← 전체 기간</a>' : "");
   $("#m-all", el)?.addEventListener("click", e => { e.preventDefault(); M.year = ""; M.unit = "year"; viewMacro(el); });
-  $("#m-chart").innerHTML = stackedBars(periods, M.types, val, {fmt});
+  $("#m-chart").innerHTML = stackedBars(periods, M.types, val, {fmt, extra: p => hyb(p) ? ` · 그중 신종자본 ${fmt(hyb(p))}` : ""});
   if (periods.length) $("#m-range").textContent = `${periods[0]} – ${periods.at(-1)} · 발행일 기준 · 정정·중복 공시 제외`;
 
   // KPI: 최근 기간 vs 전 기간
@@ -318,11 +319,11 @@ async function viewMacro(el) {
   $("#m-wall").innerHTML = dtypes.length ? legend(dtypes) + svg : '<p class="na">채무증권 유형을 선택하세요</p>';
 
   // 표
-  const head = `<thead><tr><th class="l">기간</th>${M.types.map(t => `<th>${SHORT[t]}</th>`).join("")}<th>합계</th></tr></thead>`;
+  const head = `<thead><tr><th class="l">기간</th>${M.types.map(t => `<th>${SHORT[t]}</th>`).join("")}<th>합계</th><th title="신종자본증권·영구채·조건부자본증권">그중 신종자본</th></tr></thead>`;
   const cell = (p, t) => M.metric === "amount" ? eok(val(p, t)) : n0(val(p, t));
-  $("#m-table").innerHTML = head + "<tbody>" + [...periods].reverse().map(p => `<tr><td class="l">${p}</td>${M.types.map(t => `<td>${val(p, t) ? cell(p, t) : '<span class="na">–</span>'}</td>`).join("")}<td class="amt">${M.metric === "amount" ? eok(sum(p, "amount")) : n0(sum(p, "count"))}</td></tr>`).join("") + "</tbody>";
-  $("#m-csv").onclick = () => csv(`fundflow_${M.unit}_${M.metric}.csv`, [["기간", ...M.types.map(t => LABEL[t]), "합계"],
-    ...periods.map(p => [p, ...M.types.map(t => val(p, t)), sum(p, M.metric)])]);
+  $("#m-table").innerHTML = head + "<tbody>" + [...periods].reverse().map(p => `<tr><td class="l">${p}</td>${M.types.map(t => `<td>${val(p, t) ? cell(p, t) : '<span class="na">–</span>'}</td>`).join("")}<td class="amt">${M.metric === "amount" ? eok(sum(p, "amount")) : n0(sum(p, "count"))}</td><td style="color:var(--RCPS)">${hyb(p) ? (M.metric === "amount" ? eok(hyb(p)) : n0(hyb(p))) : '<span class="na">–</span>'}</td></tr>`).join("") + "</tbody>";
+  $("#m-csv").onclick = () => csv(`fundflow_${M.unit}_${M.metric}.csv`, [["기간", ...M.types.map(t => LABEL[t]), "합계", "그중 신종자본"],
+    ...periods.map(p => [p, ...M.types.map(t => val(p, t)), sum(p, M.metric), hyb(p)])]);
 }
 function BUCKET_RANGE(b) {
   const d = new Date(), ym = x => x.toISOString().slice(0, 7), add = m => { const x = new Date(d); x.setMonth(x.getMonth() + m); return x; };
@@ -331,7 +332,7 @@ function BUCKET_RANGE(b) {
 }
 
 /* ══════════════ 2. 만기 Monitor ══════════════ */
-const MO = {types: BONDS.join(","), status: "outstanding", fin: "exclude", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity", page: 0, size: 50};
+const MO = {types: BONDS.join(","), status: "outstanding", fin: "exclude", hybrid: "", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity", page: 0, size: 50};
 async function viewMonitor(el) {
   const on = MO.types.split(",").filter(Boolean);
   el.innerHTML = `
@@ -351,6 +352,7 @@ async function viewMonitor(el) {
         <label class="field">to<input type="month" id="mo-i2" value="${MO.issue_to}"></label>
         <label class="field">만기 연월 from<input type="month" id="mo-m1" value="${MO.maturity_from}"></label>
         <label class="field">to<input type="month" id="mo-m2" value="${MO.maturity_to}"></label>
+        <label class="field">신종자본증권<select id="mo-hyb"><option value="">전체</option><option value="only" ${MO.hybrid === "only" ? "selected" : ""}>신종자본만</option><option value="exclude" ${MO.hybrid === "exclude" ? "selected" : ""}>제외</option></select></label>
         <label class="field">정렬<select id="mo-sort">${[["maturity", "만기 임박"], ["issue", "최근 발행"], ["amount", "발행금액"], ["coupon", "표면금리"]].map(([v, l]) => `<option value="${v}" ${MO.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <button class="btn" id="mo-reset">초기화</button>
       </div>
@@ -374,9 +376,9 @@ async function viewMonitor(el) {
   };
   const bind = (id, k) => $(id, el).addEventListener("change", e => { MO[k] = e.target.value.trim(); reload(); });
   bind("#mo-off", "offering"); bind("#mo-i1", "issue_from"); bind("#mo-i2", "issue_to");
-  bind("#mo-m1", "maturity_from"); bind("#mo-m2", "maturity_to"); bind("#mo-sort", "sort");
+  bind("#mo-hyb", "hybrid"); bind("#mo-m1", "maturity_from"); bind("#mo-m2", "maturity_to"); bind("#mo-sort", "sort");
   let tq; $("#mo-q", el).addEventListener("input", e => { clearTimeout(tq); tq = setTimeout(() => { MO.q = e.target.value.trim(); MO.page = 0; loadMonitorRows(el); }, 300); });
-  $("#mo-reset", el).onclick = () => { Object.assign(MO, {types: BONDS.join(","), status: "outstanding", fin: "exclude", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity"}); reload(); };
+  $("#mo-reset", el).onclick = () => { Object.assign(MO, {types: BONDS.join(","), status: "outstanding", fin: "exclude", hybrid: "", offering: "", q: "", issue_from: "", issue_to: "", maturity_from: "", maturity_to: "", sort: "maturity"}); reload(); };
   $("#mo-prev", el).onclick = () => { if (MO.page > 0) { MO.page--; loadMonitorRows(el); } };
   $("#mo-next", el).onclick = () => { MO.page++; loadMonitorRows(el); };
   $("#mo-csv", el).onclick = async () => {
@@ -385,12 +387,12 @@ async function viewMonitor(el) {
   };
   await loadMonitorRows(el);
 }
-const monParams = () => ({types: MO.types || TYPES.join(","), status: MO.status, fin: MO.fin, offering: MO.offering, q: MO.q,
+const monParams = () => ({types: MO.types || TYPES.join(","), status: MO.status, fin: MO.fin, hybrid: MO.hybrid, offering: MO.offering, q: MO.q,
   issue_from: MO.issue_from, issue_to: MO.issue_to, maturity_from: MO.maturity_from, maturity_to: MO.maturity_to, sort: MO.sort});
 const SEC_CSV = [["잔존일수", s => s.days_left], ["만기일", s => s.maturity_date], ["회사", s => s.corp_name], ["종목코드", s => s.stock_code],
   ["유형", s => LABEL[s.sec_type]], ["공모/사모", s => s.offering], ["회차", s => s.series], ["명칭", s => s.name], ["발행일", s => s.issue_date],
   ["발행금액", s => s.amount], ["표면금리", s => s.coupon], ["만기수익률", s => s.ytm], ["전환/행사/교환가액", s => s.conv_price],
-  ["리픽싱하한", s => s.refix_floor], ["청구시작", s => s.conv_start], ["청구종료", s => s.conv_end], ["신용등급", s => s.rating],
+  ["리픽싱하한", s => s.refix_floor], ["청구시작", s => s.conv_start], ["청구종료", s => s.conv_end], ["신용등급", s => s.rating], ["신종자본", s => s.hybrid ? "Y" : ""],
   ["상환여부", s => s.repaid], ["희석률", s => s.dilution_pct], ["주관사", s => s.underwriter], ["공시", s => s.dart_url]];
 
 function secTable(items, {corp = true} = {}) {
@@ -403,7 +405,7 @@ function secTable(items, {corp = true} = {}) {
       <td><span class="dday ${soon ? "hot" : ""}">${d == null ? "–" : d < 0 ? "만기" : "D-" + d}</span></td>
       <td class="l">${dt(s.maturity_date)}</td>
       ${corp ? `<td class="l nm" title="${esc(s.corp_name)}">${esc(s.corp_name)}${s.corp_cls ? ` <span class="pill">${CLS[s.corp_cls] || ""}</span>` : ""}</td>` : ""}
-      <td class="l">${tag(s.sec_type)}</td><td class="l">${esc(s.offering || "–")}</td>
+      <td class="l">${tag(s.sec_type)}${s.hybrid ? ' <span class="tag" style="--c:var(--RCPS)" title="신종자본증권·영구채·조건부자본증권">신종</span>' : ""}</td><td class="l">${esc(s.offering || "–")}</td>
       <td class="l wrap-txt">${esc([s.series && s.series + "회", s.name].filter(Boolean).join(" · ") || "–")}</td>
       <td class="l">${dt(s.issue_date)}</td><td class="amt">${eok(s.amount)}</td>
       <td>${pct(s.coupon)}</td><td>${pct(s.ytm)}</td><td>${s.conv_price ? n0(s.conv_price) : "–"}</td>

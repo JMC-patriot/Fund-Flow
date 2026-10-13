@@ -475,9 +475,17 @@ async function viewCompany(el, code) {
 }
 
 /* ── 발행 시뮬레이션 ── */
+function f0Amount(f) {
+  const v = Math.abs(+f.total_equity || 0) * 0.1 / 1e8;
+  if (!v) return 100;
+  const p = Math.pow(10, Math.max(0, Math.floor(Math.log10(v)) - 1));
+  return Math.round(v / p) * p;
+}
 function renderSim(p, fins, secs) {
   if (!fins.length) { p.innerHTML = '<h3>발행 시뮬레이션</h3><p class="na">기준 재무제표가 없어 계산할 수 없습니다.</p>'; return; }
-  const S = {base: 0, type: "CB", amount: 100, rate: 3, conv: 100, use: "cash", rcps: "liab", current: false};
+  // 기본 발행금액: 자기자본의 10%를 유효숫자 2자리로 (최소 10억)
+  const tenPct = Math.max(10, +f0Amount(fins[0]));
+  const S = {base: 0, type: "CB", amount: tenPct, rate: 3, conv: 100, use: "cash", rcps: "liab", current: false};
   const typeOpts = ["SB", "CB", "BW", "EB", "RCPS", "EQUITY", "CP"];
   p.innerHTML = `<div class="row between"><h3 style="margin:0">발행 시뮬레이션</h3>
       ${secs.length ? `<label class="field" style="flex-direction:row;align-items:center;gap:6px">기존 증권 불러오기<select id="s-pick"><option value="">선택</option>${secs.slice(0, 50).map((s, i) => `<option value="${i}">${SHORT[s.sec_type]} ${dt(s.issue_date)} ${eok(s.amount)}억</option>`).join("")}</select></label>` : ""}</div>

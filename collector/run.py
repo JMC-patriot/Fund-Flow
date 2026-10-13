@@ -294,6 +294,12 @@ where r.source = 'equity_rs' and (coalesce(r.method, '') like '%%주주%%' or ex
     and not d.superseded and d.amount > 0 and d.corp_code = r.corp_code
     and abs(d.rcept_dt - r.rcept_dt) <= 120));
 
+-- 반대로 IPO로 남은 건과 같은 시기의 유상증자 결정(상장 전 공모)은 유상증자 집계에서 제외
+update securities d set superseded = true
+where d.source = 'decision' and d.sec_type = 'EQUITY' and exists (
+  select 1 from securities i where i.sec_type = 'IPO' and not i.superseded
+    and i.corp_code = d.corp_code and abs(i.rcept_dt - d.rcept_dt) <= 120);
+
 -- 공모 CB/BW/EB 신고서는 결정 공시와 중복
 update securities r set superseded = true
 where r.source = 'bond_rs' and r.sec_type in ('CB','BW','EB') and exists (

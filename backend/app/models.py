@@ -152,3 +152,22 @@ class Source(BaseModel):
     name: str
     api: str
     used_for: str
+
+
+class CompareLine(BaseModel):
+    account_nm: str
+    values: list[Optional[float]] = Field(description="columns와 같은 순서의 금액(원)")
+
+
+class CompareSection(BaseModel):
+    sj_div: str = Field(description="BS 재무상태표 / IS 손익계산서 / CIS 포괄손익 / CF 현금흐름표 / SCE 자본변동표")
+    sj_nm: str
+    columns: list[str] = Field(description="예: 2026 반기 누적, 2025 반기 누적 (전년동기), 2025 연간 …")
+    lines: list[CompareLine]
+
+
+class StatementCompare(BaseModel):
+    corp_code: str
+    fs_div: str
+    basis: str = Field(description="사용한 보고서")
+    sections: list[CompareSection]

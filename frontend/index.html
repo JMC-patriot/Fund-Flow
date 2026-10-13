@@ -562,35 +562,40 @@ function renderSim(p, fins, secs) {
   sync(); calc();
 }
 
-/* ── 전체 재무제표 ── */
+/* ── 전체 재무제표: 최근 분·반기(+전년동기) + 직전 3개년 ── */
 function renderFS(p, code, fins) {
-  const reps = fins.filter(f => f.reprt_code === "11011" || fins.indexOf(f) < 4);
-  if (!reps.length) { p.innerHTML = '<h3>전체 재무제표</h3><p class="na">재무 데이터가 없습니다.</p>'; return; }
-  p.innerHTML = `<div class="row between"><h3 style="margin:0">전체 재무제표</h3>
-    <div class="row"><select id="fs-rep" class="btn">${reps.map((f, i) => `<option value="${i}">${esc(f.report)}</option>`).join("")}</select>
-    <select id="fs-div" class="btn"><option value="CFS">연결</option><option value="OFS">별도</option></select></div></div>
-    <div class="seg fs-tabs" id="fs-sj"></div><div class="tbl-wrap scroll-y" id="fs-body"><p class="na">불러오는 중…</p></div>`;
+  if (!fins.length) { p.innerHTML = '<h3>전체 재무제표</h3><p class="na">재무 데이터가 없습니다.</p>'; return; }
+  p.innerHTML = `<div class="row between"><div><h3 style="margin:0">전체 재무제표 <span class="na" style="font-weight:400">(억원)</span></h3>
+      <p class="note" id="fs-basis" style="margin:2px 0 0"></p></div>
+    <select id="fs-div" class="btn"><option value="CFS">연결</option><option value="OFS">별도</option></select></div>
+    <div class="seg fs-tabs" id="fs-sj"></div><div class="tbl-wrap scroll-y" id="fs-body"><p class="na">DART에서 불러오는 중…</p></div>`;
   let data = null, sj = "BS";
-  const SJ = {BS: "재무상태표", IS: "손익계산서", CIS: "포괄손익계산서", CF: "현금흐름표", SCE: "자본변동표"};
+  const isQ = c => / (1분기|반기|3분기)/.test(c);
   const draw = () => {
-    const have = [...new Set(data.lines.map(l => l.sj_div))];
-    if (!have.includes(sj)) sj = have[0];
-    $("#fs-sj", p).innerHTML = have.map(k => `<button data-sj="${k}" class="${k === sj ? "on" : ""}">${SJ[k] || k}</button>`).join("");
-    const L = data.lines.filter(l => l.sj_div === sj);
-    $("#fs-body", p).innerHTML = L.length ? `<table class="fs"><thead><tr><th class="l">계정 (억원)</th><th>당기</th><th>전기</th><th class="hide-m">전전기</th></tr></thead><tbody>${
-      L.map(l => `<tr><td class="acc">${esc(l.account_nm)}</td><td>${eok(l.this)}</td><td>${eok(l.prev)}</td><td class="hide-m">${eok(l.prev2)}</td></tr>`).join("")}</tbody></table>`
-      : '<p class="na">해당 보고서의 재무제표가 없습니다. 연결/별도를 바꿔 보세요.</p>';
+    const sec = data.sections.find(x => x.sj_div === sj) || data.sections[0];
+    sj = sec.sj_div;
+    $("#fs-sj", p).innerHTML = data.sections.map(x => `<button data-sj="${x.sj_div}" class="${x.sj_div === sj ? "on" : ""}">${esc(x.sj_nm)}</button>`).join("");
+    const cols = sec.columns, qn = cols.filter(isQ).length, yoy = qn === 2;   // 분·반기 + 전년동기 → 증감률
+    const head = cols.map((c, i) => `<th style="${i < qn ? "background:var(--sel)" : ""}">${esc(c)}</th>` + (yoy && i === 1 ? '<th style="background:var(--sel)">YoY</th>' : "")).join("");
+    const body = sec.lines.map(l => {
+      const v = l.values, g = yoy && v[0] != null && v[1] ? (v[0] - v[1]) / Math.abs(v[1]) * 100 : null;
+      return `<tr><td class="acc">${esc(l.account_nm)}</td>${v.map((x, i) => `<td style="${i < qn ? "background:color-mix(in srgb,var(--sel) 60%,transparent)" : ""}">${eok(x)}</td>` +
+        (yoy && i === 1 ? `<td class="${g == null ? "na" : g >= 0 ? "down" : "up"}" style="background:color-mix(in srgb,var(--sel) 60%,transparent)">${g == null ? "–" : (g >= 0 ? "+" : "") + g.toFixed(1) + "%"}</td>` : "")).join("")}</tr>`;
+    }).join("");
+    $("#fs-body", p).innerHTML = sec.lines.length ? `<table class="fs"><thead><tr><th class="l">계정</th>${head}</tr></thead><tbody>${body}</tbody></table>`
+      : '<p class="na">해당 재무제표가 없습니다.</p>';
   };
   const load = async () => {
-    const f = reps[+$("#fs-rep", p).value];
     $("#fs-body", p).innerHTML = '<p class="na">DART에서 불러오는 중…</p>';
-    try { data = await get(`/api/companies/${code}/statements`, {bsns_year: f.bsns_year, reprt_code: f.reprt_code, fs_div: $("#fs-div", p).value});
-      if (!data.lines.length) { $("#fs-sj", p).innerHTML = ""; $("#fs-body", p).innerHTML = '<p class="na">해당 보고서의 재무제표가 없습니다. 연결/별도를 바꿔 보세요.</p>'; return; }
-      draw(); }
-    catch (e) { $("#fs-body", p).innerHTML = `<p class="na">${esc(e.message)}</p>`; }
+    try {
+      data = await get(`/api/companies/${code}/statements/compare`, {fs_div: $("#fs-div", p).value});
+      $("#fs-basis", p).textContent = `기준: ${data.basis}${data.fs_div === "OFS" ? " · 별도" : " · 연결"} · 분·반기 손익·현금흐름은 연초부터 누적`;
+      if (!data.sections.length) { $("#fs-sj", p).innerHTML = ""; $("#fs-body", p).innerHTML = '<p class="na">재무제표가 없습니다. 연결/별도를 바꿔 보세요.</p>'; return; }
+      draw();
+    } catch (e) { $("#fs-body", p).innerHTML = `<p class="na">${esc(e.message)}</p>`; }
   };
   $("#fs-div", p).value = fins[0].fs_div === "별도" ? "OFS" : "CFS";
-  p.addEventListener("change", e => { if (e.target.matches("select")) load(); });
+  p.addEventListener("change", e => { if (e.target.id === "fs-div") load(); });
   p.addEventListener("click", e => { const b = e.target.closest("[data-sj]"); if (b) { sj = b.dataset.sj; draw(); } });
   load();
 }

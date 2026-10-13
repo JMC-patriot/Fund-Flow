@@ -16,7 +16,8 @@ from psycopg.types.json import Jsonb
 
 from .db import pool, fetch_all, fetch_one, execute
 from .models import (Health, Meta, TypeInfo, MacroPoint, Security, SecurityPage, MaturityBucket,
-                     CompanyHit, Company, Financial, Statements, StatementLine, Source)
+                     CompanyHit, Company, Financial, Statements, StatementLine, Source,
+                     StatementCompare, CompareSection, CompareLine)
 
 TYPES = {"SB": "회사채", "CB": "전환사채", "BW": "신주인수권부사채", "EB": "교환사채",
          "RCPS": "상환전환우선주", "EQUITY": "유상증자", "IPO": "IPO", "CP": "기업어음",
@@ -359,6 +360,102 @@ def _amt(v):
         return float(str(v).replace(",", "")) if v not in (None, "", "-") else None
     except ValueError:
         return None
+
+
+def _load_statements(corp_code, year, reprt, fs_div):
+    """전체 재무제표: 저장본이 있으면 그것을, 없으면 DART에서 받아 저장"""
+    p = {"c": corp_code, "y": year, "r": reprt, "f": fs_div}
+    row = fetch_one("""select data from statements where corp_code=%(c)s and bsns_year=%(y)s
+                       and reprt_code=%(r)s and fs_div=%(f)s""", p)
+    if row:
+        return row["data"]
+    data = _dart_statements(corp_code, year, reprt, fs_div)
+    if fetch_one("select 1 as x from companies where corp_code=%(c)s", p):
+        execute("""insert into statements (corp_code, bsns_year, reprt_code, fs_div, data)
+                   values (%(c)s,%(y)s,%(r)s,%(f)s,%(d)s) on conflict do nothing""", {**p, "d": Jsonb(data)})
+    return data
+
+
+def _first(d, *keys):
+    for k in keys:
+        v = _amt(d.get(k))
+        if v is not None:
+            return v
+    return None
+
+
+SJ_NAMES = {"BS": "재무상태표", "IS": "손익계산서", "CIS": "포괄손익계산서", "CF": "현금흐름표", "SCE": "자본변동표"}
+PERIOD_NM = {"11013": "1분기", "11012": "반기", "11014": "3분기"}
+
+
+@app.get("/api/companies/{corp_code}/statements/compare", response_model=StatementCompare, tags=["company"],
+         summary="최근 분·반기 + 직전 3개년 연간 재무제표 비교")
+def statements_compare(corp_code: str, fs_div: Literal["CFS", "OFS"] = Query("CFS")):
+    """최신 보고서가 분기·반기면 그 기간(누적)과 전년 동기를 함께, 이어서 최근 사업보고서의 3개년을 붙입니다.
+    재무상태표는 분·반기말 + 최근 3개 연도말."""
+    fins = financials(corp_code)                     # 없으면 DART에서 받아 옴
+    annual = next((f for f in fins if f["reprt_code"] == "11011"), None)
+    latest = fins[0] if fins else None
+    quarter = latest if latest and latest["reprt_code"] != "11011" and (
+        not annual or latest["base_date"] > annual["base_date"]) else None
+    if not annual and not quarter:
+        raise HTTPException(404, "재무제표가 없습니다")
+
+    def load(f):
+        if not f:
+            return []
+        data = _load_statements(corp_code, f["bsns_year"], f["reprt_code"], fs_div)
+        if not data and fs_div == "CFS":             # 연결이 없으면 별도
+            data = _load_statements(corp_code, f["bsns_year"], f["reprt_code"], "OFS")
+        return data
+
+    Q, A = load(quarter), load(annual)
+    ay = annual["bsns_year"] if annual else None
+    qy, qn = (quarter["bsns_year"], PERIOD_NM[quarter["reprt_code"]]) if quarter else (None, None)
+
+    def key(d):
+        aid = (d.get("account_id") or "").strip()
+        return aid if aid and not aid.startswith("-") else (d.get("account_nm") or "").strip()
+
+    sections = []
+    for sj in ("BS", "IS", "CIS", "CF", "SCE"):
+        q_rows = [d for d in Q if d.get("sj_div") == sj]
+        a_rows = [d for d in A if d.get("sj_div") == sj]
+        if not q_rows and not a_rows:
+            continue
+        cols, getters = [], []
+        if q_rows:
+            if sj == "BS":
+                cols.append(f"{qy} {qn}말")
+                getters.append(("q", lambda d: _first(d, "thstrm_amount")))
+            else:
+                cols += [f"{qy} {qn} 누적", f"{qy - 1} {qn} 누적 (전년동기)"]
+                getters += [("q", lambda d: _first(d, "thstrm_add_amount", "thstrm_amount")),
+                            ("q", lambda d: _first(d, "frmtrm_add_amount", "frmtrm_q_amount", "frmtrm_amount"))]
+        if a_rows:
+            suffix = "말" if sj == "BS" else " 연간"
+            cols += [f"{ay}{suffix}", f"{ay - 1}{suffix}", f"{ay - 2}{suffix}"]
+            getters += [("a", lambda d: _first(d, "thstrm_amount")),
+                        ("a", lambda d: _first(d, "frmtrm_amount")),
+                        ("a", lambda d: _first(d, "bfefrmtrm_amount"))]
+        order, names, qmap, amap = [], {}, {}, {}
+        for src, rows, m in (("q", q_rows, qmap), ("a", a_rows, amap)):
+            for d in sorted(rows, key=lambda d: int(d.get("ord") or 0)):
+                k = key(d)
+                if k not in m:
+                    m[k] = d
+                if k not in names:
+                    names[k] = (d.get("account_nm") or "").strip()
+                    order.append(k)
+        lines = []
+        for k in order:
+            vals = [fn((qmap if src == "q" else amap).get(k, {})) for src, fn in getters]
+            if any(v is not None for v in vals):
+                lines.append(CompareLine(account_nm=names[k], values=vals))
+        sj_nm = next((d.get("sj_nm") for d in q_rows + a_rows if d.get("sj_nm")), SJ_NAMES.get(sj, sj))
+        sections.append(CompareSection(sj_div=sj, sj_nm=sj_nm, columns=cols, lines=lines))
+    basis = " + ".join(x for x in (quarter and f"{qy}년 {qn}보고서", annual and f"{ay}년 사업보고서") if x)
+    return StatementCompare(corp_code=corp_code, fs_div=fs_div, basis=basis, sections=sections)
 
 
 @app.get("/api/companies/{corp_code}/statements", response_model=Statements, tags=["company"],

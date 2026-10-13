@@ -46,8 +46,13 @@ class Dart:
 
     def json(self, path: str, **params) -> dict:
         """status 000 → 응답, 013(데이터 없음) → {'status':'013'}, 그 외 오류는 예외"""
-        for _ in range(3):
-            j = self._request(f"{path}.json", params).json()
+        for attempt in range(4):
+            try:
+                j = self._request(f"{path}.json", params).json()
+            except ValueError:                    # 빈 응답·HTML 오류 페이지
+                print(f"  ! {path} 응답이 JSON이 아님, 재시도 {attempt + 1}/4")
+                time.sleep(10 * (attempt + 1))
+                continue
             st = j.get("status")
             if st in ("000", "013"):
                 return j

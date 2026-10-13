@@ -314,16 +314,20 @@ def fetch_financials(dart, db, share: int):
             if dart.calls >= stop:
                 return
             chunk = items[k:k + 100]
-            j = dart.json("fnlttMultiAcnt", corp_code=",".join(c for _, c in chunk),
-                          bsns_year=str(y), reprt_code=code)
-            fins = parse.financial_rows(j.get("list", []), code)
-            got = {f["corp_code"] for f in fins}
-            # 다중회사 API에 없는 회사(일부 비상장)는 단일회사 API로
-            for rc, corp in chunk:
-                if corp in got or dart.calls >= stop:
-                    continue
-                j1 = dart.json("fnlttSinglAcnt", corp_code=corp, bsns_year=str(y), reprt_code=code)
-                fins += parse.financial_rows(j1.get("list", []), code)
+            try:
+                j = dart.json("fnlttMultiAcnt", corp_code=",".join(c for _, c in chunk),
+                              bsns_year=str(y), reprt_code=code)
+                fins = parse.financial_rows(j.get("list", []), code)
+                got = {f["corp_code"] for f in fins}
+                # 다중회사 API에 없는 회사(일부 비상장)는 단일회사 API로
+                for rc, corp in chunk:
+                    if corp in got or dart.calls >= stop:
+                        continue
+                    j1 = dart.json("fnlttSinglAcnt", corp_code=corp, bsns_year=str(y), reprt_code=code)
+                    fins += parse.financial_rows(j1.get("list", []), code)
+            except RuntimeError as e:             # 이 묶음은 다음 실행으로 넘기고 계속
+                print(f"  ! 재무 {y} {code} 묶음 건너뜀: {e}")
+                continue
             save_fins(db, fins)
             mark(db, [rc for rc, _ in chunk], col="fin_status")
 

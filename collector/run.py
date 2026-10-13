@@ -74,7 +74,9 @@ class Store:
         self.con = self._connect()
 
     def _connect(self):
-        return psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=30)
+        con = psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=30)
+        con.execute("set statement_timeout = '15min'")   # Supabase 기본 2분: 정리(DEDUPE) 쿼리가 커지면 부족
+        return con
 
     def _run(self, fn):
         """연결이 끊겼으면(네트워크 순단·절전) 다시 연결해서 한 번 더 시도"""

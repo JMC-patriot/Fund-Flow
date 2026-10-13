@@ -104,7 +104,7 @@ def bond_rs(general: dict, lead: Optional[str]) -> Optional[dict]:
     tm = text(general.get("tm")) or ""
     return _row(
         id=f"R:{general['rcept_no']}:{tm}", corp_code=general["corp_code"], sec_type=t,
-        source="bond_rs", offering=text(general.get("slmth")) or "공모",
+        source="bond_rs", offering=offering_of(general.get("slmth"), name) or "공모",
         rcept_no=general["rcept_no"], rcept_dt=to_date(general["rcept_no"][:8]),
         name=name, series=tm or None, issue_date=to_date(general.get("pymd")),
         amount=amount, coupon=num(general.get("intr")), ytm=num(general.get("isrr")),
@@ -144,7 +144,7 @@ def periodic(r: dict) -> Optional[dict]:
     h = hashlib.sha1(key.encode()).hexdigest()[:20]
     return _row(
         id=f"P:{h}", corp_code=r["corp_code"], sec_type=t, source="periodic",
-        offering=text(r.get("isu_mth_nm")), rcept_no=r.get("rcept_no"),
+        offering=offering_of(r.get("isu_mth_nm")), rcept_no=r.get("rcept_no"),
         rcept_dt=to_date((r.get("rcept_no") or "")[:8]), name=text(r.get("scrits_knd_nm")),
         issue_date=issue, amount=amount, coupon=num(r.get("intrt")), maturity_date=mtd,
         rating=text(r.get("evl_grad_instt")), repaid=repaid_status(r.get("repy_at")),

@@ -22,7 +22,7 @@ create table if not exists securities (
     sec_type        varchar(6)    not null check (sec_type in
                       ('SB','CB','BW','EB','RCPS','EQUITY','IPO','CP','STB')),
     source          varchar(10)   not null check (source in ('decision','bond_rs','equity_rs','periodic')),
-    offering        varchar(4),                         -- 공모 / 사모
+    offering        varchar(20),                        -- 공모 / 사모
     rcept_no        varchar(14),                        -- 원 공시 접수번호
     rcept_dt        date,                               -- 공시 접수일
     name            text,                               -- 증권 명칭 (예: 무기명식 이권부 무보증 사모 전환사채)

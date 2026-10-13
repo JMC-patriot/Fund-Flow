@@ -113,22 +113,22 @@ def bond_rs(general: dict, lead: Optional[str]) -> Optional[dict]:
 
 
 # ── 증권신고서(지분증권) → IPO ─────────────────────────────────────────
-def equity_rs(general: dict, lead: Optional[str]) -> Optional[dict]:
-    g = general
-    amount = num(g.get("slta"))
-    cnt = num(g.get("stkcnt"))
-    price = num(g.get("slprc"))
+def equity_rs(kind: dict, general: dict, lead: Optional[str]) -> Optional[dict]:
+    """kind: '증권의종류' 행(종류·수량·공모가·공모총액·모집방법), general: 같은 접수번호의 '일반사항'(청약·납입일)"""
+    amount = num(kind.get("slta"))
+    cnt, price = num(kind.get("stkcnt")), num(kind.get("slprc"))
     if not amount and cnt and price:
         amount = cnt * price
     if not amount:
         return None
+    stk = text(kind.get("stksen")) or ""
     return _row(
-        id=f"S:{g['rcept_no']}:{text(g.get('stksen')) or ''}", corp_code=g["corp_code"],
-        sec_type="IPO", source="equity_rs", offering="공모", rcept_no=g["rcept_no"],
-        rcept_dt=to_date(g["rcept_no"][:8]), name=text(g.get("stksen")) or "기업공개",
-        issue_date=to_date(g.get("pymd")) or to_date(g.get("sbd")), amount=amount,
-        conv_price=price, shares=cnt, method=text(g.get("slmthn")), underwriter=lead,
-        dkey=f"IPO:{text(g.get('stksen')) or ''}", raw=clean(g))
+        id=f"S:{kind['rcept_no']}:{stk}", corp_code=kind["corp_code"],
+        sec_type="IPO", source="equity_rs", offering="공모", rcept_no=kind["rcept_no"],
+        rcept_dt=to_date(kind["rcept_no"][:8]), name=f"기업공개({stk})" if stk else "기업공개",
+        issue_date=to_date(general.get("pymd")) or to_date(general.get("sbd")), amount=amount,
+        conv_price=price, shares=cnt, method=text(kind.get("slmthn")), underwriter=lead,
+        dkey=f"IPO:{stk}", raw=clean({**general, **kind}))
 
 
 # ── 정기보고서: 채무증권 발행실적 ──────────────────────────────────────

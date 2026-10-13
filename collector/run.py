@@ -47,7 +47,7 @@ def classify(r: dict, ty: str):
     elif ty == "C":
         if "증권신고서(채무증권)" in n:
             return "BOND_RS"
-        if "증권신고서(지분증권)" in n and r.get("corp_cls") == "E":
+        if "증권신고서(지분증권)" in n:          # 상장 여부는 현재 기준이라 판단에 쓰지 않음 (중복은 정리 단계에서)
             return "EQUITY_RS"
     elif ty == "A" and not n.startswith("["):    # 정정 보고서는 제외 (API가 최종본을 돌려줌)
         m = re.match(r"(사업|반기|분기)보고서\((\d{4})\.(\d{2})\)", n)
@@ -189,8 +189,12 @@ def fetch_registrations(dart, db):
         for u in groups_.get("인수인정보", []):
             if (u.get("actsen") or "").strip() == "대표" or u["rcept_no"] not in leads:
                 leads[u["rcept_no"]] = text(u.get("actnmn"))
-        fn = parse.bond_rs if kind == "BOND_RS" else parse.equity_rs
-        db.securities([fn(g, leads.get(g["rcept_no"])) for g in groups_.get("일반사항", [])])
+        if kind == "BOND_RS":
+            db.securities([parse.bond_rs(g, leads.get(g["rcept_no"])) for g in groups_.get("일반사항", [])])
+        else:                                   # 공모가·금액은 '증권의종류', 일정은 '일반사항'
+            general = {g["rcept_no"]: g for g in groups_.get("일반사항", [])}
+            db.securities([parse.equity_rs(k, general.get(k["rcept_no"], {}), leads.get(k["rcept_no"]))
+                           for k in groups_.get("증권의종류", [])])
         mark(db, [rc for rc, _ in fl])
 
 
@@ -282,6 +286,13 @@ update securities s set superseded = exists (
 where s.source in ('decision','bond_rs','equity_rs');
 
 update securities set superseded = false where source = 'periodic';
+
+-- 지분증권 신고서: 상장사의 공모증자(유상증자 결정 공시가 있거나 주주배정 방식)는 IPO가 아님
+update securities r set superseded = true
+where r.source = 'equity_rs' and (coalesce(r.method, '') like '%%주주%%' or exists (
+  select 1 from securities d where d.source = 'decision' and d.sec_type in ('EQUITY','RCPS')
+    and not d.superseded and d.amount > 0 and d.corp_code = r.corp_code
+    and abs(d.rcept_dt - r.rcept_dt) <= 120));
 
 -- 공모 CB/BW/EB 신고서는 결정 공시와 중복
 update securities r set superseded = true

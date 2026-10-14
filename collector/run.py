@@ -267,7 +267,7 @@ def fetch_balances(dart, db, per_corp_docs=15):
     todo = [(c, d) for c, d in corps if not db.done(f"ilist:{c}")]       # 회사별 과거 목록은 한 번만
     print(f"메자닌 잔액 공시 목록: {len(todo)}개사")
     for i, (corp, first) in enumerate(todo, 1):
-        bgn = max(first - timedelta(days=7), date(2019, 1, 1))
+        bgn = min(max(first - timedelta(days=7), date(2019, 1, 1)), today)   # 미래 발행 예정분은 오늘까지
         rows, page = [], 1
         while True:
             j = dart.json("list", corp_code=corp, bgn_de=f"{bgn:%Y%m%d}", end_de=f"{today:%Y%m%d}",

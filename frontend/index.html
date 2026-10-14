@@ -420,7 +420,7 @@ const SEC_CSV = [["잔존일수", s => s.days_left], ["만기일", s => s.maturi
 
 function secTable(items, {corp = true} = {}) {
   const head = `<thead><tr><th>잔존</th><th class="l">만기일</th>${corp ? '<th class="l">회사</th>' : ""}<th class="l">유형</th><th class="l">공모/사모</th>
-    <th class="l">회차·명칭</th><th class="l">발행일</th><th>발행금액(억)</th><th>Coupon</th><th>YTM</th><th>전환·교환가</th>
+    <th class="l">회차·명칭</th><th class="l">발행일</th><th title="메자닌은 전환·상환 후 남은 잔액 (공시 기준)">잔액(억)</th><th>Coupon</th><th>YTM</th><th>전환·교환가</th>
     <th class="hide-m">리픽싱 하한</th><th class="l">신용등급</th><th class="l hide-m">상환</th><th></th></tr></thead>`;
   const rows = items.map(s => {
     const d = s.days_left, soon = d != null && d >= 0 && d <= 182;
@@ -430,7 +430,7 @@ function secTable(items, {corp = true} = {}) {
       ${corp ? `<td class="l nm" title="${esc(s.corp_name)}">${esc(s.corp_name)}${s.corp_cls ? ` <span class="pill">${CLS[s.corp_cls] || ""}</span>` : ""}</td>` : ""}
       <td class="l">${tag(s.sec_type)}${s.hybrid ? ' <span class="tag" style="--c:var(--RCPS)" title="신종자본증권·영구채·조건부자본증권">신종</span>' : ""}</td><td class="l">${esc(s.offering || "–")}</td>
       <td class="l wrap-txt">${esc([s.series && s.series + "회", s.name].filter(Boolean).join(" · ") || "–")}</td>
-      <td class="l">${dt(s.issue_date)}</td><td class="amt">${eok(s.amount)}</td>
+      <td class="l">${dt(s.issue_date)}</td><td class="amt">${s.remaining != null && Math.round(s.remaining) !== Math.round(s.amount) ? `${eok(s.remaining)}<div class="na" style="font-size:11px;font-weight:400" title="${esc(dt(s.balance_asof))} 공시 기준 남은 잔액">발행 ${eok(s.amount)}</div>` : eok(s.amount)}</td>
       <td>${pct(s.coupon)}</td><td>${pct(s.ytm)}</td><td>${s.conv_price ? n0(s.conv_price) : "–"}</td>
       <td class="hide-m">${s.refix_floor ? n0(s.refix_floor) : "–"}</td>
       <td class="l" title="${esc(s.rating || "")}">${s.grade ? `<b>${esc(s.grade)}</b>` : s.rating ? `<span class="na" style="font-size:12px">${esc(s.rating.slice(0, 14))}…</span>` : "–"}</td><td class="l hide-m">${esc(s.repaid || "–")}</td>
@@ -649,7 +649,7 @@ async function viewOverhang(el) {
       <div class="row" style="justify-content:space-between;gap:12px">
         <div class="row">
           <div class="chips" id="oh-types">${["CB","BW","EB"].map(t => `<button class="chip ${OH.types.includes(t) ? "on" : ""}" style="--c:var(--${t})" data-oht="${t}"><i></i>${t}</button>`).join("")}</div>
-          <div class="seg" id="oh-win">${[["all","전체"],["open","지금 청구 가능"],["3m","3개월 내 시작"],["6m","6개월 내"],["12m","1년 내"]].map(([v,l]) => `<button data-ohw="${v}" class="${OH.window === v ? "on" : ""}">${l}</button>`).join("")}</div>
+          <div class="seg" id="oh-win">${[["all","전체"],["open","지금 청구 가능"],["1m","1개월 내 시작"],["3m","3개월 내"],["6m","6개월 내"],["12m","1년 내"]].map(([v,l]) => `<button data-ohw="${v}" class="${OH.window === v ? "on" : ""}">${l}</button>`).join("")}</div>
           <button class="chip ${OH.itm ? "on" : ""}" id="oh-itm" style="--c:var(--warn)"><i></i>주가 ≥ 전환가만</button>
         </div>
         <div class="seg"><button data-ohv="items" class="${OH.view === "items" ? "on" : ""}">증권별</button><button data-ohv="companies" class="${OH.view === "companies" ? "on" : ""}">회사별</button></div>
@@ -717,8 +717,72 @@ async function renderCoOverhang(p, code) {
 }
 
 /* ══════════════ 5. 리그테이블 ══════════════ */
+const LG = {cat: "bond", year: "", q: "", start: "", end: "", grade: "", fin: "exclude", firm: "", basis: "lead"};
+const lgPeriod = () => LG.start || LG.end ? {start: LG.start, end: LG.end} : {year: LG.year, quarter: LG.year ? LG.q : ""};
+const LG_CAT = {bond: "공모 회사채", equity: "공모 유상증자", ipo: "IPO"};
 async function viewLeague(el) {
-  el.innerHTML = `<h1>리그테이블</h1><p class="sub">공모 회사채 · 공모 유상증자 · IPO 주관사 순위 — 준비 중입니다 (인수단 데이터 수집 후 공개)</p>`;
+  el.innerHTML = `
+    <div class="row between"><div><h1>리그테이블</h1><p class="sub" id="lg-sub">대표주관 금액 기준 주관사 순위 · 공동 대표주관은 금액을 균등 배분</p></div></div>
+    <div class="row sec" style="gap:12px">
+      <div class="seg seg-lg">${Object.entries(LG_CAT).map(([k, v]) => `<button data-lgc="${k}" class="${LG.cat === k ? "on" : ""}">${v}</button>`).join("")}</div>
+      <label class="field" style="flex-direction:row;align-items:center;gap:6px;font-size:13px">연도
+        <select id="lg-year"><option value="">전체 (2020~)</option>${YEARS.map(y => `<option value="${y}" ${String(LG.year) === y ? "selected" : ""}>${y}년</option>`).join("")}</select></label>
+      <div class="seg" id="lg-q" title="연도를 고른 뒤 분기 선택">${[["", "연간"], ["1", "1Q"], ["2", "2Q"], ["3", "3Q"], ["4", "4Q"]].map(([v, l]) => `<button data-lgq="${v}" class="${LG.q === v ? "on" : ""}" ${LG.year ? "" : "disabled style=\"opacity:.4\""}>${l}</button>`).join("")}</div>
+      <span class="field" style="flex-direction:row;align-items:center;gap:4px;font-size:13px">직접 지정
+        <input id="lg-s" placeholder="2024-07" value="${esc(LG.start)}" style="width:86px"> ~ <input id="lg-e" placeholder="2025-06" value="${esc(LG.end)}" style="width:86px">
+        ${LG.start || LG.end ? '<button class="btn" id="lg-clr" style="height:28px">해제</button>' : ""}</span>
+      ${LG.cat === "bond" ? `<label class="field" style="flex-direction:row;align-items:center;gap:6px;font-size:13px">등급
+        <select id="lg-grade"><option value="">전체</option><option value="AA" ${LG.grade === "AA" ? "selected" : ""}>AA 이상</option><option value="A" ${LG.grade === "A" ? "selected" : ""}>A</option><option value="BBB" ${LG.grade === "BBB" ? "selected" : ""}>BBB 이하</option></select></label>` : ""}
+      <div class="seg"><button data-lgb="lead" class="${LG.basis === "lead" ? "on" : ""}">대표주관 금액 기준</button><button data-lgb="uw" class="${LG.basis === "uw" ? "on" : ""}">인수 금액 기준</button></div>
+      <div class="seg"><button data-lgf="exclude" class="${LG.fin === "exclude" ? "on" : ""}">금융회사 제외</button><button data-lgf="include" class="${LG.fin === "include" ? "on" : ""}">포함</button></div>
+    </div>
+    <div class="kpis sec" id="lg-kpi"></div>
+    <div class="grid2 sec">
+      <div class="panel"><div class="tbl-wrap" id="lg-table"><p class="na">불러오는 중…</p></div>
+        <p class="note">대표주관 금액: 딜 금액을 공동 대표주관사 수로 나눠 배분. 인수 금액: 인수단 참여분 포함 실제 인수액. 수수료율: 신고서의 인수대가 중 읽을 수 있는 것만, 인수금액 가중 평균. 증권사를 누르면 딜 목록이 나와요.</p></div>
+      <div class="panel" id="lg-deals"><h3>딜 목록</h3><p class="na">왼쪽에서 증권사를 고르세요.</p></div>
+    </div>`;
+  el.onclick = e => {
+    const c = e.target.closest("[data-lgc]"), f = e.target.closest("[data-lgf]"), r = e.target.closest("tr[data-firm]"), b = e.target.closest("[data-lgb]");
+    if (b) { LG.basis = b.dataset.lgb; viewLeague(el); }
+    const qq = e.target.closest("[data-lgq]"); if (qq && LG.year) { LG.q = qq.dataset.lgq; LG.start = LG.end = ""; viewLeague(el); }
+    if (e.target.closest("#lg-clr")) { LG.start = LG.end = ""; viewLeague(el); }
+    if (c) { LG.cat = c.dataset.lgc; LG.firm = ""; viewLeague(el); }
+    if (f) { LG.fin = f.dataset.lgf; viewLeague(el); }
+    if (r) { LG.firm = r.dataset.firm; $$("tr[data-firm]", el).forEach(x => x.classList.toggle("sel", x === r)); loadLeagueDeals(el); }
+    const co = e.target.closest("tr[data-corp]"); if (co && !e.target.closest("a")) location.hash = "#/company/" + co.dataset.corp;
+  };
+  $("#lg-year", el).onchange = e => { LG.year = e.target.value; if (!LG.year) LG.q = ""; LG.start = LG.end = ""; viewLeague(el); };
+  const ymNorm = v => { const d = (v.match(/\d+/g) || []).join(""); return d.length >= 6 ? `${d.slice(0, 4)}-${d.slice(4, 6)}` : d.length === 4 ? d : ""; };
+  ["#lg-s", "#lg-e"].forEach((id, k) => $(id, el).onchange = e => { LG[k ? "end" : "start"] = ymNorm(e.target.value); viewLeague(el); });
+  $("#lg-grade", el)?.addEventListener("change", e => { LG.grade = e.target.value; viewLeague(el); });
+  const d = await get("/api/league", {category: LG.cat, ...lgPeriod(), grade: LG.cat === "bond" ? LG.grade : "", fin: LG.fin, basis: LG.basis});
+  const hasPrev = !!(LG.year || LG.start || LG.end);
+  const uwB = LG.basis === "uw";
+  $("#lg-sub", el).textContent = uwB ? "인수 금액 기준 주관사 순위 · 인수단 참여분 포함 실제 인수액" : "대표주관 금액 기준 주관사 순위 · 공동 대표주관은 금액을 균등 배분";
+  const top = d.rows[0];
+  $("#lg-kpi", el).innerHTML = `
+    <div class="kpi"><div class="k">${LG_CAT[LG.cat]} 총액</div><div class="v">${won(d.total_amount)}</div><div class="s">${d.period}</div></div>
+    <div class="kpi"><div class="k">딜 수</div><div class="v">${n0(d.total_deals)}건</div><div class="s">주관사 ${d.rows.length}곳</div></div>
+    <div class="kpi"><div class="k">1위</div><div class="v" style="font-size:18px">${esc(top?.underwriter || "–")}</div><div class="s">점유율 ${pct(top?.share, 1)}</div></div>
+    <div class="kpi"><div class="k">상위 5곳 점유율</div><div class="v">${pct(d.rows.slice(0, 5).reduce((a, r) => a + r.share, 0), 1)}</div><div class="s">${uwB ? "인수 금액" : "대표주관 금액"} 기준</div></div>`;
+  const maxS = Math.max(1, ...d.rows.map(r => r.share));
+  const chg = r => r.prev_rank == null ? '<span class="na">신규</span>' : r.prev_rank === r.rank ? '<span class="na">–</span>'
+    : r.prev_rank > r.rank ? `<span class="down">▲${r.prev_rank - r.rank}</span>` : `<span class="up">▼${r.rank - r.prev_rank}</span>`;
+  $("#lg-table", el).innerHTML = d.rows.length ? `<table><thead><tr><th class="l">#</th><th class="l">증권사</th>${uwB ? "<th>인수금액(억)</th><th>대표주관 건수</th><th>점유율</th><th class=\"hide-m\">대표주관(억)</th>" : "<th>대표주관(억)</th><th>건수</th><th>점유율</th><th class=\"hide-m\">인수금액(억)</th>"}<th class="hide-m">수수료율</th>${hasPrev ? "<th>전년 동기 대비</th>" : ""}</tr></thead><tbody>${
+    d.rows.map(r => `<tr class="click ${LG.firm === r.underwriter ? "sel" : ""}" data-firm="${esc(r.underwriter)}"><td class="l rk">${r.rank}</td><td class="l nm">${esc(r.underwriter)}</td>
+      <td class="amt">${eok(uwB ? r.underwritten : r.lead_amount)}</td><td>${n0(r.deals)}</td>
+      <td><span class="minibar hide-m"><i style="width:${r.share / maxS * 100}%"></i></span>${pct(r.share, 1)}</td>
+      <td class="hide-m">${eok(uwB ? r.lead_amount : r.underwritten)}</td><td class="hide-m">${r.fee_rate != null ? r.fee_rate.toFixed(2) + "%" : "–"}</td>${hasPrev ? `<td>${chg(r)}</td>` : ""}</tr>`).join("")}</tbody></table>`
+    : '<p class="na">해당 조건의 딜이 없습니다</p>';
+  if (LG.firm) loadLeagueDeals(el);
+}
+async function loadLeagueDeals(el) {
+  const p = $("#lg-deals", el); p.innerHTML = `<h3>${esc(LG.firm)} · 딜 목록</h3><p class="na">불러오는 중…</p>`;
+  const ds = await get("/api/league/deals", {category: LG.cat, underwriter: LG.firm, ...lgPeriod(), grade: LG.cat === "bond" ? LG.grade : "", fin: LG.fin});
+  p.innerHTML = `<h3>${esc(LG.firm)} · 딜 ${ds.length}건</h3><div class="tbl-wrap scroll-y"><table><thead><tr><th class="l">일자</th><th class="l">회사</th><th>금액(억)</th>${LG.cat === "bond" ? '<th class="l">등급</th>' : ""}<th class="l">조건</th><th class="l">대표주관</th><th></th></tr></thead><tbody>${
+    ds.map(x => `<tr class="click" data-corp="${x.corp_code}"><td class="l">${dt(x.issue_date)}</td><td class="l nm">${esc(x.corp_name)}</td><td class="amt">${eok(x.amount)}</td>${LG.cat === "bond" ? `<td class="l">${esc(x.grade || "–")}</td>` : ""}
+      <td class="l" style="font-size:12px">${esc(x.detail || "–")}</td><td class="l" style="font-size:12px">${esc(x.leads.join(", ") || "–")}</td><td><a href="${esc(x.dart_url)}" target="_blank" rel="noopener">원문↗</a></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 /* ── 발행조건 벤치마크 ── */

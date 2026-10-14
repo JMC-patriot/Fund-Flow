@@ -6,7 +6,7 @@ Swagger UI: /docs   ·   ReDoc: /redoc
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, Optional
 
 import requests
@@ -199,6 +199,14 @@ SEC_COLS = f"""s.id, s.corp_code, c.corp_name, c.stock_code, c.corp_cls, s.sec_t
   s.repaid_asof, s.method, s.underwriter,
   case when s.rcept_no is not null then 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' || s.rcept_no end as dart_url"""
 
+# 메자닌(CB·BW·EB)의 최신 미전환·미상환 잔액 (행사·조정·만기전취득 공시)
+BAL_JOIN = """left join lateral (
+    select b.remaining, b.rcept_dt from mezz_balance b
+    where s.sec_type in ('CB','BW','EB') and b.corp_code = s.corp_code and b.remaining is not null
+      and b.series = (regexp_match(coalesce(s.series, ''), '\d+'))[1]::int::text
+      and b.rcept_dt >= coalesce(s.issue_date, s.rcept_dt)
+    order by b.rcept_dt desc, b.rcept_no desc limit 1) bal on true"""
+
 SORTS = {"maturity": "s.maturity_date asc nulls last, s.amount desc",
          "issue": "s.issue_date desc nulls last, s.amount desc",
          "amount": "s.amount desc nulls last",
@@ -224,6 +232,7 @@ def securities(types: Optional[str] = TypesQ,
                    None, description="신종자본증권: only 신종자본만 / exclude 제외 / 생략 시 전체"),
                limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
     where = f"""{VALID} and s.sec_type = any(%(types)s) and {FIN}
+      and (%(status)s = 'all' or coalesce(bal.remaining, 1) > 0)
       and (%(hyb)s::text is null or ({HYBRID}) = (%(hyb)s = 'only'))
       and (%(status)s = 'all' or ({OUTSTANDING}))
       and (%(off)s::text is null or s.offering = %(off)s)
@@ -236,9 +245,10 @@ def securities(types: Optional[str] = TypesQ,
          "i1": month_start(issue_from), "i2": month_end(issue_to),
          "m1": month_start(maturity_from), "m2": month_end(maturity_to),
          "fin": fin, "fin_re": FIN_RE, "hyb": hybrid, "limit": limit, "offset": offset}
-    agg = fetch_one(f"""select count(*) as n, coalesce(sum(s.amount), 0) as amt
-                        from securities s join companies c using (corp_code) where {where}""", p)
-    items = fetch_all(f"""select {SEC_COLS} from securities s join companies c using (corp_code)
+    agg = fetch_one(f"""select count(*) as n, coalesce(sum(coalesce(bal.remaining, s.amount)), 0) as amt
+                        from securities s join companies c using (corp_code) {BAL_JOIN} where {where}""", p)
+    items = fetch_all(f"""select {SEC_COLS}, bal.remaining, bal.rcept_dt as balance_asof
+                          from securities s join companies c using (corp_code) {BAL_JOIN}
                           where {where} order by {SORTS[sort]}, s.id
                           limit %(limit)s offset %(offset)s""", p)
     return SecurityPage(total=agg["n"], total_amount=agg["amt"], items=items)
@@ -382,8 +392,8 @@ def _apply_balance(r, bal):
 @app.get("/api/overhang", response_model=OverhangPage, tags=["monitor"],
          summary="메자닌(CB·BW·EB) 잠재 물량 — 주가 대비 전환가, 희석률, 청구 일정")
 def overhang(types: Optional[str] = Query("CB,BW,EB", description="CB,BW,EB 중"),
-             window: Literal["all", "open", "3m", "6m", "12m"] = Query(
-                 "all", description="open: 지금 청구 가능 / 3m·6m·12m: 그 기간 안에 청구 시작"),
+             window: Literal["all", "open", "1m", "3m", "6m", "12m"] = Query(
+                 "all", description="open: 지금 청구 가능 / 1m·3m·6m·12m: 그 기간 안에 청구 시작"),
              itm: bool = Query(False, description="true면 종가 ≥ 전환가(이익 구간)만"),
              market: Optional[Literal["KOSPI", "KOSDAQ"]] = Query(None),
              q: Optional[str] = Query(None, description="회사명 일부"),
@@ -427,7 +437,7 @@ def overhang(types: Optional[str] = Query("CB,BW,EB", description="CB,BW,EB 중"
         dts = (start - today).days if start and start > today else 0
         if window == "open" and status != "청구 가능":
             continue
-        if window in ("3m", "6m", "12m") and not (status == "청구 전" and dts <= {"3m": 92, "6m": 183, "12m": 366}[window]):
+        if window in ("1m", "3m", "6m", "12m") and not (status == "청구 전" and dts <= {"1m": 31, "3m": 92, "6m": 183, "12m": 366}[window]):
             continue
         mny = round(close / cp * 100, 1)
         if itm and mny < 100:
@@ -530,8 +540,22 @@ GRADE_BANDS = {"AA": ("AAA", "AA+", "AA", "AA-"), "A": ("A+", "A", "A-"),
                "BBB": ("BBB+", "BBB", "BBB-", "BB+", "BB", "BB-", "B+", "B", "B-", "CCC", "CC", "C", "D")}
 
 
+# 사명 변경·표기 차이를 현재 사명으로 통일
+FIRM_ALIAS = {
+    "케이비증권": "KB증권", "신한금융투자": "신한투자증권", "미래에셋대우": "미래에셋증권",
+    "하이투자증권": "iM증권", "아이엠증권": "iM증권", "하나금융투자": "하나증권", "DB금융투자": "DB증권",
+    "아이비케이투자증권": "IBK투자증권", "KTB투자증권": "다올투자증권", "이베스트투자증권": "LS증권",
+    "엘에스증권": "LS증권", "NH농협증권": "NH투자증권", "디에스투자증권": "DS투자증권",
+    "케이알투자증권": "KR투자증권", "제이피모간증권회사서울지점": "JP모간", "골드만삭스증권회사서울지점": "골드만삭스",
+    "모간스탠리인터내셔날증권회사서울지점": "모간스탠리", "메릴린치증권서울지점": "메릴린치",
+    "크레디트스위스증권서울지점": "크레디트스위스", "크레디트스위스퍼스트보스톤증권서울지점": "크레디트스위스",
+    "씨티그룹글로벌마켓증권": "씨티그룹", "유비에스증권리미티드(영업소)": "UBS",
+}
+
+
 def _firm(n):
-    return re.sub(r"\(주\)|㈜|주식회사|\s", "", n or "")
+    k = re.sub(r"\(주\)|㈜|주식회사|\s", "", n or "")
+    return FIRM_ALIAS.get(k, k)
 
 
 def _league_deals(cat, d0, d1, fin, band, firm=None):
@@ -573,14 +597,43 @@ def _league_deals(cat, d0, d1, fin, band, firm=None):
     return out
 
 
+def _league_period(year, quarter, start, end):
+    """(시작일, 종료일, 표시명, 전년 같은 기간 함수)"""
+    if start or end:
+        d0 = month_start(start) or SINCE
+        d1 = (month_end(end) - timedelta(days=1)) if end else date.today()
+        return d0, d1, f"{d0:%Y.%m}~{d1:%Y.%m}"
+    if year and quarter:
+        d0 = date(year, 3 * quarter - 2, 1)
+        d1 = date(year + (quarter == 4), (3 * quarter) % 12 + 1, 1) - timedelta(days=1)
+        return d0, d1, f"{year} {quarter}Q"
+    if year:
+        return date(year, 1, 1), date(year, 12, 31), str(year)
+    return SINCE, date.today(), f"{SINCE.year}~"
+
+
+def _shift_year(d, n=-1):
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:                                   # 2월 29일
+        return d.replace(year=d.year + n, day=28)
+
+
 @app.get("/api/league", response_model=League, tags=["macro"], summary="주관사 리그테이블")
 def league(category: LeagueCat = Query("bond", description="bond 공모 회사채 / equity 공모 유상증자 / ipo"),
            year: Optional[int] = Query(None, ge=2020, description="연도 (생략 시 2020년~전체)"),
+           quarter: Optional[int] = Query(None, ge=1, le=4, description="분기 (연도와 함께)"),
+           start: Optional[str] = Query(None, description="직접 지정 시작 연월 YYYY-MM (연도·분기보다 우선)"),
+           end: Optional[str] = Query(None, description="직접 지정 끝 연월 YYYY-MM (포함)"),
            grade: Optional[Literal["AA", "A", "BBB"]] = Query(None, description="회사채 등급 구간: AA 이상 / A / BBB 이하"),
+           basis: Literal["lead", "uw"] = Query("lead", description="lead: 대표주관 금액 기준 / uw: 인수 금액 기준"),
            fin: Literal["exclude", "include", "only"] = FinQ):
-    """대표주관 금액(공동 대표주관은 균등 배분) 순위. 인수 금액은 인수단 참여분 포함, 수수료율은 인수금액 가중 평균."""
-    def table(y):
-        d0, d1 = (date(y, 1, 1), date(y, 12, 31)) if y else (SINCE, date.today())
+    """lead: 대표주관 금액(공동 대표주관은 균등 배분) 순위 / uw: 인수단 참여분 포함 실제 인수 금액 순위.
+    점유율과 전년 대비 순위는 고른 기준으로 계산합니다. 수수료율은 인수금액 가중 평균."""
+    P0, P1, label = _league_period(year, quarter, start, end)
+    custom = bool(year or start or end)
+
+    def table(d0, d1):
         agg = {}
         deals = _league_deals(category, d0, d1, fin, grade if category == "bond" else None)
         for d, leads, us in deals:
@@ -596,24 +649,28 @@ def league(category: LeagueCat = Query("bond", description="bond 공모 회사�
                 if u["fee_rate"] is not None and amt and 0 < float(u["fee_rate"]) < 20:
                     a["fee_w"] += float(u["fee_rate"]) * amt
                     a["fee_a"] += amt
-        total = sum(float(d["amount"]) for d, _, _ in deals)
-        ranked = sorted(((f, a) for f, a in agg.items() if a["lead"] > 0), key=lambda x: -x[1]["lead"])
+        k = "lead" if basis == "lead" else "uw"
+        total = sum(float(d["amount"]) for d, _, _ in deals) if basis == "lead" else sum(a["uw"] for a in agg.values())
+        ranked = sorted(((f, a) for f, a in agg.items() if a[k] > 0), key=lambda x: -x[1][k])
         return deals, total, ranked
-    deals, total, ranked = table(year)
-    prev = {f: i for i, (f, _) in enumerate(table(year - 1)[2], 1)} if year and year > 2020 else {}
+    deals, total, ranked = table(P0, P1)
+    prev = ({f: i for i, (f, _) in enumerate(table(_shift_year(P0), _shift_year(P1))[2], 1)}
+            if custom and _shift_year(P0) >= SINCE else {})
     rows = [LeagueRow(rank=i, underwriter=f, lead_amount=round(a["lead"]), deals=a["deals"],
-                      share=round(a["lead"] / total * 100, 2) if total else 0, underwritten=round(a["uw"]),
+                      share=round(a["lead" if basis == "lead" else "uw"] / total * 100, 2) if total else 0, underwritten=round(a["uw"]),
                       fee_rate=round(a["fee_w"] / a["fee_a"], 3) if a["fee_a"] else None, prev_rank=prev.get(f))
             for i, (f, a) in enumerate(ranked, 1)]
-    return League(category=category, period=str(year) if year else f"{SINCE.year}~", total_amount=total,
+    return League(category=category, period=label, basis=basis, total_amount=total,
                   total_deals=len(deals), rows=rows)
 
 
 @app.get("/api/league/deals", response_model=list[LeagueDeal], tags=["macro"], summary="주관사별 딜 목록")
 def league_deals(category: LeagueCat = Query("bond"), underwriter: str = Query(..., description="증권사 이름"),
-                 year: Optional[int] = Query(None, ge=2020), grade: Optional[Literal["AA", "A", "BBB"]] = Query(None),
+                 year: Optional[int] = Query(None, ge=2020), quarter: Optional[int] = Query(None, ge=1, le=4),
+                 start: Optional[str] = Query(None), end: Optional[str] = Query(None),
+                 grade: Optional[Literal["AA", "A", "BBB"]] = Query(None),
                  fin: Literal["exclude", "include", "only"] = FinQ):
-    d0, d1 = (date(year, 1, 1), date(year, 12, 31)) if year else (SINCE, date.today())
+    d0, d1, _ = _league_period(year, quarter, start, end)
     out = []
     for d, leads, _ in _league_deals(category, d0, d1, fin, grade if category == "bond" else None, firm=underwriter):
         if category == "bond":

@@ -66,11 +66,13 @@ class Security(BaseModel):
     method: Optional[str]
     underwriter: Optional[str]
     dart_url: Optional[str]
+    remaining: Optional[float] = Field(None, description="메자닌 최신 미전환·미상환 잔액 (공시 기준, 없으면 null)")
+    balance_asof: Optional[date] = Field(None, description="잔액 공시일")
 
 
 class SecurityPage(BaseModel):
     total: int
-    total_amount: float
+    total_amount: float = Field(description="금액 합계 (메자닌은 남은 잔액 기준)")
     items: list[Security]
 
 
@@ -316,7 +318,7 @@ class LeagueRow(BaseModel):
     underwriter: str
     lead_amount: float = Field(description="대표주관 금액 (공동 대표주관은 균등 배분, 원)")
     deals: int = Field(description="대표주관 건수")
-    share: float = Field(description="대표주관 금액 점유율 (%)")
+    share: float = Field(description="점유율 (%) — 고른 기준(대표주관 금액 또는 인수 금액)")
     underwritten: float = Field(description="인수 금액 합계 (인수단 참여 포함, 원)")
     fee_rate: Optional[float] = Field(None, description="평균 인수수수료율 (%), 인수금액 가중")
     prev_rank: Optional[int] = Field(None, description="직전 연도 순위 (연도 선택 시)")
@@ -337,6 +339,7 @@ class LeagueDeal(BaseModel):
 class League(BaseModel):
     category: str
     period: str
+    basis: str = Field("lead", description="lead 대표주관 금액 / uw 인수 금액")
     total_amount: float
     total_deals: int
     rows: list[LeagueRow]

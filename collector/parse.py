@@ -149,7 +149,7 @@ def periodic(r: dict) -> Optional[dict]:
         issue_date=issue, amount=amount, coupon=num(r.get("intrt")), maturity_date=mtd,
         rating=text(r.get("evl_grad_instt")), repaid=repaid_status(r.get("repy_at")),
         repaid_asof=to_date(r.get("stlm_dt")), underwriter=text(r.get("mngt_cmpny")),
-        dkey=f"P:{h}", raw=clean(r))
+        dkey=f"P:{h}", raw={})          # 정기보고서 행은 원본 미저장 (단기사채 등 행이 많아 DB 용량 초과)
 
 
 def repaid_status(v) -> Optional[str]:

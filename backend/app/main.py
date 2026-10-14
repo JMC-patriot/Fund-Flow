@@ -116,8 +116,9 @@ TypesQ = Query(None, description="쉼표로 구분한 유형. 생략하면 전�
 # ── meta ───────────────────────────────────────────────────────────────
 @app.get("/health", response_model=Health, tags=["meta"], summary="서버·DB 상태")
 def health():
-    r = fetch_one("select count(*) as n, max(rcept_dt) as latest from securities where not superseded")
-    return Health(status="ok", securities=r["n"], latest_rcept_dt=r["latest"])
+    # 가볍게: Render가 수 초마다 호출하므로 전체 건수 대신 통계 추정치와 인덱스 조회만
+    r = fetch_one("select reltuples::bigint as n from pg_class where relname = 'securities'")
+    return Health(status="ok", securities=max(r["n"] or 0, 0), latest_rcept_dt=None)
 
 
 @app.get("/api/meta", response_model=Meta, tags=["meta"], summary="유형 목록과 데이터 범위")

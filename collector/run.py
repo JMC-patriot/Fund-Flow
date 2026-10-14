@@ -132,11 +132,16 @@ class Store:
                 for r in rows if r]
         cols = parse.COLS
         upd = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("id",))
+        cmp = [c for c in cols if c not in ("id", "raw", "dkey")]
+        cmp_old = ", ".join(f"securities.{c}" for c in cmp)
+        cmp_new = ", ".join(f"excluded.{c}" for c in cmp)
         sql = f"""insert into securities ({", ".join(cols)})
             values ({", ".join(f"%({c})s" for c in cols)})
             on conflict (id) do update set {upd}, loaded_at=now()
-            where securities.repaid_asof is null or excluded.repaid_asof is null
-               or excluded.repaid_asof >= securities.repaid_asof"""
+            where (securities.repaid_asof is null or excluded.repaid_asof is null
+                   or excluded.repaid_asof >= securities.repaid_asof)
+              -- 값이 실제로 바뀔 때만 다시 씀 (무료 DB 디스크 쓰기 절약)
+              and ({cmp_old}) is distinct from ({cmp_new})"""
         try:
             self.many(sql, rows)
             # 발행회사명은 위 갱신 조건(최신 상환 기준일)과 무관하게 채움

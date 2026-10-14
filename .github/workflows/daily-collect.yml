@@ -32,6 +32,7 @@ jobs:
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
           DART_BUDGET: ${{ github.event.inputs.budget || '100000' }}
         shell: bash
         run: python -u collector/run.py 2>&1 | tee run.log

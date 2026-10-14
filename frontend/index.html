@@ -175,6 +175,8 @@ footer{border-top:1px solid var(--line);padding:18px 0 36px;font-size:12px;color
       <a href="#/macro" data-tab="macro">개요</a>
       <a href="#/monitor" data-tab="monitor">만기 Monitor</a>
       <a href="#/company" data-tab="company">회사 상세</a>
+      <a href="#/overhang" data-tab="overhang">메자닌 오버행</a>
+      <a href="#/league" data-tab="league">리그테이블</a>
     </nav>
     <div class="search">
       <input id="q" type="search" placeholder="회사명 또는 종목코드" autocomplete="off" aria-label="회사 검색">
@@ -471,6 +473,7 @@ async function viewCompany(el, code) {
       <div class="kpi"><div class="k">유동비율 / 영업이익률</div><div class="v">${pct(f0?.current_ratio, 0)}</div><div class="s">영업이익률 ${pct(f0?.op_margin, 1)}</div></div></div>
 
     <div class="panel sec"><h3>잔존만기가 남은 증권 (${out.total}건)</h3><div class="tbl-wrap"><table>${secTable(out.items, {corp: false})}</table></div></div>
+    <div class="panel sec" id="co-oh"><h3>메자닌 오버행</h3><p class="na">불러오는 중…</p></div>
 
     <div class="grid-eq sec">
       <div class="panel"><h3>요약 재무제표 · 재무지표 추이 (억원)</h3><div class="tbl-wrap" id="co-fin"></div>
@@ -505,6 +508,7 @@ async function viewCompany(el, code) {
 
   renderSim($("#sim", el), fins, out.items);
   renderFS($("#fs", el), code, fins);
+  renderCoOverhang($("#co-oh", el), code);
 }
 
 /* ── 발행 시뮬레이션 ── */
@@ -633,6 +637,90 @@ function renderFS(p, code, fins) {
   load();
 }
 
+/* ══════════════ 4. 메자닌 오버행 ══════════════ */
+const OH = {types: "CB,BW,EB", window: "all", itm: false, market: "", q: "", sort: "start", view: "items"};
+const ohBadge = it => it.balance_source === "공시" ? `<span class="pill" title="${esc(dt(it.balance_asof))} 공시 기준 잔액">공시 ${esc(dt(it.balance_asof)).slice(2)}</span>` : '<span class="pill" title="이후 행사·조정 공시가 없어 발행 당시 기준">발행 기준</span>';
+const mnyCell = v => v == null ? "–" : `<span class="${v >= 100 ? "up" : ""}" style="font-weight:${v >= 100 ? 600 : 400}">${v.toFixed(0)}%</span>`;
+async function viewOverhang(el) {
+  el.innerHTML = `
+    <div class="row between"><div><h1>메자닌 오버행</h1><p class="sub" id="oh-sub">잔존 CB·BW·EB가 주식으로 바뀌어 시장에 나올 수 있는 잠재 물량</p></div></div>
+    <div class="kpis sec" id="oh-kpi"></div>
+    <div class="panel sec">
+      <div class="row" style="justify-content:space-between;gap:12px">
+        <div class="row">
+          <div class="chips" id="oh-types">${["CB","BW","EB"].map(t => `<button class="chip ${OH.types.includes(t) ? "on" : ""}" style="--c:var(--${t})" data-oht="${t}"><i></i>${t}</button>`).join("")}</div>
+          <div class="seg" id="oh-win">${[["all","전체"],["open","지금 청구 가능"],["3m","3개월 내 시작"],["6m","6개월 내"],["12m","1년 내"]].map(([v,l]) => `<button data-ohw="${v}" class="${OH.window === v ? "on" : ""}">${l}</button>`).join("")}</div>
+          <button class="chip ${OH.itm ? "on" : ""}" id="oh-itm" style="--c:var(--warn)"><i></i>주가 ≥ 전환가만</button>
+        </div>
+        <div class="seg"><button data-ohv="items" class="${OH.view === "items" ? "on" : ""}">증권별</button><button data-ohv="companies" class="${OH.view === "companies" ? "on" : ""}">회사별</button></div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:flex-end">
+        <label class="field">회사<input id="oh-q" value="${esc(OH.q)}" placeholder="회사명" style="width:150px"></label>
+        <label class="field">시장<select id="oh-mkt"><option value="">전체</option><option ${OH.market === "KOSPI" ? "selected" : ""}>KOSPI</option><option ${OH.market === "KOSDAQ" ? "selected" : ""}>KOSDAQ</option></select></label>
+        <label class="field">정렬<select id="oh-sort">${[["start","청구 시작 임박"],["dilution","희석률"],["moneyness","주가/전환가"],["value","잠재 물량 가치"]].map(([v,l]) => `<option value="${v}" ${OH.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      </div>
+    </div>
+    <div class="panel sec"><div class="tbl-wrap" id="oh-table"><p class="na">불러오는 중…</p></div>
+      <p class="note">잔액은 전환·행사·교환 청구, 전환가액 조정, 만기전 사채취득 공시에서 가장 최근 값을 씁니다. <b>공시</b> 표시가 없으면 이후 공시가 없어 발행 당시 기준이에요.
+      EB는 교환 대상 회사의 주가를 씁니다. 5% 미만 투자자의 실제 매도(EXIT)는 공개 데이터가 없어, 전환된 물량을 시장에 나온 공급으로 봅니다.</p></div>`;
+  el.onclick = e => {
+    const t = e.target.closest("[data-oht]"), w = e.target.closest("[data-ohw]"), v = e.target.closest("[data-ohv]");
+    if (t) { const cur = OH.types.split(",").filter(Boolean), c = t.dataset.oht; OH.types = (cur.includes(c) ? cur.filter(x => x !== c) : ["CB","BW","EB"].filter(x => cur.includes(x) || x === c)).join(","); viewOverhang(el); }
+    if (w) { OH.window = w.dataset.ohw; viewOverhang(el); }
+    if (v) { OH.view = v.dataset.ohv; viewOverhang(el); }
+    if (e.target.closest("#oh-itm")) { OH.itm = !OH.itm; viewOverhang(el); }
+    const row = e.target.closest("tr[data-corp]"); if (row && !e.target.closest("a,button")) location.hash = "#/company/" + row.dataset.corp;
+  };
+  $("#oh-mkt", el).onchange = e => { OH.market = e.target.value; viewOverhang(el); };
+  $("#oh-sort", el).onchange = e => { OH.sort = e.target.value; viewOverhang(el); };
+  let tq; $("#oh-q", el).oninput = e => { clearTimeout(tq); tq = setTimeout(() => { OH.q = e.target.value.trim(); viewOverhang(el); }, 400); };
+  const d = await get("/api/overhang", {types: OH.types || "CB", window: OH.window, itm: OH.itm, market: OH.market, q: OH.q, sort: OH.sort, limit: 300});
+  $("#oh-sub", el).textContent = `잔존 CB·BW·EB가 주식으로 바뀌어 시장에 나올 수 있는 잠재 물량 · 주가 기준 ${dt(d.as_of)}`;
+  $("#oh-kpi", el).innerHTML = `
+    <div class="kpi"><div class="k">잔존 메자닌</div><div class="v">${n0(d.total)}건</div><div class="s">현재 조건 기준</div></div>
+    <div class="kpi"><div class="k">잠재 물량 가치</div><div class="v">${won(d.total_value)}</div><div class="s">남은 주식수 × 종가</div></div>
+    <div class="kpi"><div class="k">주가 ≥ 전환가</div><div class="v">${n0(d.itm_count)}건</div><div class="s">전환하면 이익인 구간</div></div>
+    <div class="kpi"><div class="k">3개월 내 청구 시작</div><div class="v">${won(d.upcoming_3m_value)}</div><div class="s">곧 풀릴 수 있는 물량</div></div>`;
+  if (OH.view === "companies") {
+    $("#oh-table", el).innerHTML = d.companies.length ? `<table><thead><tr><th class="l">회사</th><th class="l">시장</th><th>건수</th><th>잔액(억)</th><th>남은 주식수</th><th>희석률</th><th>그중 이익 구간</th><th>잠재 가치(억)</th><th class="l">다음 청구 시작</th></tr></thead><tbody>${
+      d.companies.map(c => `<tr class="click" data-corp="${c.corp_code}"><td class="l nm">${esc(c.corp_name)}${c.warn ? ' <span title="확인 필요한 회차 포함">⚠️</span>' : ""}</td><td class="l">${esc(c.market || "")}</td><td>${c.count}</td><td class="amt">${eok(c.amount)}</td><td>${n0(c.shares)}</td><td><b>${pct(c.dilution, 1)}</b></td><td>${n0(c.itm_shares)}</td><td>${eok(c.value)}</td><td class="l">${dt(c.next_start)}</td></tr>`).join("")}</tbody></table>` : '<p class="na">조건에 맞는 회사가 없습니다</p>';
+    return;
+  }
+  $("#oh-table", el).innerHTML = d.items.length ? `<table><thead><tr><th class="l">회사</th><th class="l">유형</th><th class="l">회차</th><th>잔액(억)</th><th class="l">잔액 기준</th><th>현재 전환가</th><th>종가</th><th>주가/전환가</th><th>남은 주식수</th><th>희석률</th><th class="l">청구</th><th class="l">만기</th></tr></thead><tbody>${
+    d.items.map(i => `<tr class="click" data-corp="${i.corp_code}"><td class="l nm">${esc(i.corp_name)}${i.warn ? ` <span title="${esc(i.warn)}">⚠️</span>` : ""}${i.sec_type === "EB" && i.ref_name && !i.ref_name.includes(i.corp_name) ? `<div class="na" style="font-size:11px">→ ${esc(i.ref_name)}</div>` : ""}</td>
+      <td class="l">${tag(i.sec_type)}</td><td class="l">${esc(i.series || "–")}</td><td class="amt">${eok(i.remaining)}<div class="na" style="font-size:11px">발행 ${eok(i.amount)}</div></td><td class="l">${ohBadge(i)}</td>
+      <td>${n0(i.conv_price_now || i.conv_price)}</td><td>${n0(i.close)}</td><td>${mnyCell(i.moneyness)}</td><td>${n0(i.shares)}</td><td>${pct(i.dilution, 1)}</td>
+      <td class="l">${i.status === "청구 가능" ? '<span class="tag" style="--c:var(--warn)">청구 가능</span>' : `D-${i.days_to_start} <span class="na">(${dt(i.conv_start)})</span>`}</td><td class="l">${dt(i.maturity_date)}</td></tr>`).join("")}</tbody></table>` : '<p class="na">조건에 맞는 증권이 없습니다</p>';
+}
+
+/* 회사 상세: 전 회차 메자닌 잔액 */
+async function renderCoOverhang(p, code) {
+  let d; try { d = await get(`/api/companies/${code}/overhang`); } catch (e) { p.innerHTML = `<h3>메자닌 오버행</h3><p class="na">${esc(e.message)}</p>`; return; }
+  if (!d.items.length) { p.innerHTML = '<h3>메자닌 오버행</h3><p class="na">CB·BW·EB 발행 이력이 없습니다.</p>'; return; }
+  const live = d.items.filter(i => i.state === "잔존");
+  p.innerHTML = `<div class="row between"><h3 style="margin:0">메자닌 오버행 <span class="na" style="font-weight:400">· 전 회차 ${d.items.length}건, 잔존 ${live.length}건</span></h3>
+      <span class="sub">종가 ${n0(d.close)}원 · 상장주식 ${n0(d.list_shrs)}주 · ${dt(d.as_of)}</span></div>
+    <div class="kpis" style="margin:12px 0">
+      <div class="kpi"><div class="k">잔존 잔액</div><div class="v">${won(d.remaining)}</div><div class="s">이 회사 주식으로 바뀌는 것만</div></div>
+      <div class="kpi"><div class="k">잠재 오버행</div><div class="v">${n0(d.shares)}주</div><div class="s">남은 전환·행사·교환 가능 주식</div></div>
+      <div class="kpi"><div class="k">잠재 희석률</div><div class="v">${pct(d.dilution, 1)}</div><div class="s">÷ 현재 상장주식수</div></div>
+      <div class="kpi"><div class="k">잠재 물량 가치</div><div class="v">${won(d.value)}</div><div class="s">× 최근 종가</div></div></div>
+    <div class="tbl-wrap"><table><thead><tr><th class="l">유형</th><th class="l">회차</th><th class="l">발행일</th><th>발행액(억)</th><th>전환·상환(억)</th><th>잔액(억)</th><th class="l">잔액 기준</th>
+      <th>최초 → 현재 전환가</th><th>주가/전환가</th><th>남은 주식</th><th>희석률</th><th class="l">청구기간</th><th class="l">상태</th><th></th></tr></thead><tbody>${
+      d.items.map(i => `<tr style="${i.state === "잔존" ? "" : "opacity:.55"}"><td class="l">${tag(i.sec_type)}${i.own_stock ? "" : ' <span class="pill" title="' + esc(i.underlying || "") + '">타사주</span>'}</td><td class="l">${esc(i.series || "–")}</td>
+        <td class="l">${dt(i.issue_date)}</td><td>${eok(i.amount)}</td><td>${i.released != null ? eok(i.released) : "–"}</td><td class="amt">${eok(i.remaining)}</td><td class="l">${ohBadge(i)}</td>
+        <td>${n0(i.conv_price0)}${i.conv_price && i.conv_price0 && Math.round(i.conv_price) !== Math.round(i.conv_price0) ? ` → <b>${n0(i.conv_price)}</b>` : ""}</td><td>${mnyCell(i.moneyness)}</td>
+        <td>${i.shares ? n0(i.shares) : "–"}</td><td>${pct(i.dilution, 1)}</td><td class="l" style="font-size:12px">${dt(i.conv_start)} ~ ${dt(i.conv_end)}</td>
+        <td class="l">${i.state === "잔존" ? '<span class="tag" style="--c:var(--warn)">잔존</span>' : esc(i.state)}</td>
+        <td><button class="cmp" data-bench="${esc(i.id)}">비교</button></td></tr>`).join("")}</tbody></table></div>
+    <p class="note">잔액·전환가는 가장 최근 행사·조정·만기전취득 공시 기준이에요. 타사주 EB는 다른 회사 주식으로 교환돼서 이 회사 오버행 합계에서 뺐습니다.</p>`;
+}
+
+/* ══════════════ 5. 리그테이블 ══════════════ */
+async function viewLeague(el) {
+  el.innerHTML = `<h1>리그테이블</h1><p class="sub">공모 회사채 · 공모 유상증자 · IPO 주관사 순위 — 준비 중입니다 (인수단 데이터 수집 후 공개)</p>`;
+}
+
 /* ── 발행조건 벤치마크 ── */
 const bmFmt = (m, v) => v == null ? "–" : m.unit === "원" ? won(v) : m.unit === "년" ? (+v).toFixed(1) + "년" : (+v).toFixed(2) + "%";
 function bmBar(m) {
@@ -739,6 +827,8 @@ async function route() {
   scrollTo(0, 0);
   try {
     if (tab === "monitor") await viewMonitor(el);
+    else if (tab === "overhang") await viewOverhang(el);
+    else if (tab === "league") await viewLeague(el);
     else if (tab === "company") await viewCompany(el, arg);
     else await viewMacro(el);
   } catch (e) {

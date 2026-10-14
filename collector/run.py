@@ -27,7 +27,7 @@ from psycopg.types.json import Jsonb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dart import Dart, BudgetExceeded, text, to_date  # noqa: E402
+from dart import Dart, BudgetExceeded, num, text, to_date  # noqa: E402
 import parse  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +50,9 @@ def classify(r: dict, ty: str):
             return "BOND_RS"
         if "증권신고서(지분증권)" in n:          # 상장 여부는 현재 기준이라 판단에 쓰지 않음 (중복은 정리 단계에서)
             return "EQUITY_RS"
+    elif ty == "I":                               # 거래소 공시: 메자닌 행사·조정·만기전취득
+        import balance
+        return balance.kind_of(r["report_nm"])
     elif ty == "A" and not n.startswith("["):    # 정정 보고서는 제외 (API가 최종본을 돌려줌)
         m = re.match(r"(사업|반기|분기)보고서\((\d{4})\.(\d{2})\)", n)
         if m:
@@ -163,6 +166,8 @@ def scan_lists(dart, db, since: date, types=("B", "C", "A")):
     for ty in types:
         flt = {"pblntf_detail_ty": ty} if len(ty) > 1 else {"pblntf_ty": ty}
         for s, e, final in list_windows(since):
+            if ty == "I" and final:                   # 거래소 공시는 최근 구간만 (과거는 회사별로 따로 받음)
+                continue
             task = f"list:{ty}:{s:%Y%m%d}:{e:%Y%m%d}"
             if final and db.done(task):
                 continue
@@ -218,6 +223,89 @@ def update_listing_dates(db):
     print(f"상장일: {len(rows)}개사 갱신")
 
 
+# ── 주가 (KRX Open API: 최근 거래일 종가·상장주식수, 오버행 계산용) ─────────
+def update_quotes(db):
+    import requests
+    key = (os.getenv("KRX_API_KEY") or "").strip()
+    if not key:
+        print("  ! KRX_API_KEY가 없어 주가는 건너뜁니다")
+        return
+    for back in range(0, 10):                          # 휴일이면 빈 응답 → 하루씩 앞으로
+        d = date.today() - timedelta(days=back)
+        rows = []
+        for path in ("sto/stk_bydd_trd", "sto/ksq_bydd_trd"):
+            try:
+                j = requests.get(f"https://data-dbg.krx.co.kr/svc/apis/{path}", params={"basDd": f"{d:%Y%m%d}"},
+                                 headers={"AUTH_KEY": key}, timeout=30).json()
+            except (requests.RequestException, ValueError) as e:
+                print(f"  ! KRX {path} 실패: {e}")
+                return
+            rows += j.get("OutBlock_1") or []
+        if rows:
+            break
+    else:
+        return
+    num = lambda v: float(str(v).replace(",", "")) if v not in (None, "", "-") else None
+    db.many("""insert into quotes (stock_code, name, market, bas_dd, close, mktcap, list_shrs)
+               values (%s,%s,%s,%s,%s,%s,%s)
+               on conflict (stock_code) do update set name=excluded.name, market=excluded.market,
+                 bas_dd=excluded.bas_dd, close=excluded.close, mktcap=excluded.mktcap,
+                 list_shrs=excluded.list_shrs, updated_at=now()""",
+            [(r["ISU_CD"], r["ISU_NM"], r["MKT_NM"], d, num(r["TDD_CLSPRC"]), num(r["MKTCAP"]), num(r["LIST_SHRS"]))
+             for r in rows])
+    print(f"주가: {d} 기준 {len(rows)}종목")
+
+
+# ── 메자닌 잔액 (행사·전환가액 조정·만기전 사채취득 공시) ──────────────────
+def fetch_balances(dart, db, per_corp_docs=15):
+    """잔존 CB·BW·EB가 있는 회사의 거래소 공시에서 회차별 미전환 잔액·현재 전환가·남은 주식수를 추적"""
+    import balance
+    corps = db.q("""select s.corp_code, min(s.issue_date) from securities s
+                    where not s.superseded and s.sec_type in ('CB','BW','EB') and s.maturity_date >= current_date
+                      and coalesce(s.repaid,'') <> '상환' and s.issue_date is not null group by 1""")
+    today = date.today()
+    todo = [(c, d) for c, d in corps if not db.done(f"ilist:{c}")]       # 회사별 과거 목록은 한 번만
+    print(f"메자닌 잔액 공시 목록: {len(todo)}개사")
+    for i, (corp, first) in enumerate(todo, 1):
+        bgn = max(first - timedelta(days=7), date(2019, 1, 1))
+        rows, page = [], 1
+        while True:
+            j = dart.json("list", corp_code=corp, bgn_de=f"{bgn:%Y%m%d}", end_de=f"{today:%Y%m%d}",
+                          pblntf_ty="I", page_no=page, page_count=100)
+            rows += j.get("list", [])
+            if page >= int(j.get("total_page") or 1):
+                break
+            page += 1
+        keep = [(r["rcept_no"], r["corp_code"], r["corp_name"], r.get("corp_cls"), text(r.get("stock_code")),
+                 r["report_nm"].strip(), to_date(r["rcept_dt"]), k)
+                for r in rows if (k := balance.kind_of(r["report_nm"]))]
+        db.many("""insert into filings (rcept_no, corp_code, corp_name, corp_cls, stock_code, report_nm, rcept_dt, kind)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict (rcept_no) do nothing""", keep)
+        db.log(f"ilist:{corp}")
+        if i % 200 == 0:
+            print(f"  {i}/{len(todo)} (호출 {dart.calls})")
+    # 회사별 최신 공시부터 원문을 읽어 잔액 저장 (회사당 최근 per_corp_docs건까지)
+    pend = db.q("""select rcept_no, corp_code, rcept_dt, kind from (
+                     select f.*, row_number() over (partition by corp_code order by rcept_dt desc, rcept_no desc) rn
+                     from filings f where kind in ('EXERCISE','REFIX','REDEEM') and status='pending') x
+                   where rn <= %s order by rcept_dt desc""", (per_corp_docs,))
+    print(f"메자닌 잔액 공시 원문: {len(pend)}건")
+    for k, (rc, corp, dt, kind) in enumerate(pend, 1):
+        try:
+            items = balance.parse(balance.plain_text(dart.document_text(rc)), kind)
+        except RuntimeError as e:
+            print(f"  ! {rc} 건너뜀: {e}")
+            continue
+        db.many("""insert into mezz_balance (corp_code, series, rcept_no, rcept_dt, kind, remaining, conv_price, shares)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict do nothing""",
+                [(corp, it["series"], rc, dt, kind, it["remaining"], it["conv_price"], it["shares"]) for it in items])
+        mark(db, [rc])
+        if k % 300 == 0:
+            print(f"  {k}/{len(pend)} (호출 {dart.calls})")
+    # 회사당 한도를 넘는 오래된 공시는 읽지 않음
+    db.q("""update filings set status='skip' where kind in ('EXERCISE','REFIX','REDEEM') and status='pending'""")
+
+
 # ── 2) 결정 공시 ──────────────────────────────────────────────────────
 def fetch_decisions(dart, db):
     groups = defaultdict(list)
@@ -245,6 +333,7 @@ def fetch_registrations(dart, db):
         j = dart.json("bdRs" if kind == "BOND_RS" else "estkRs", corp_code=corp,
                       bgn_de=f"{min(dts):%Y%m%d}", end_de=f"{max(dts):%Y%m%d}")
         groups_ = {g["title"]: g.get("list", []) for g in j.get("group", [])}
+        save_underwriters(db, groups_.get("인수인정보", []))
         leads = {}
         for u in groups_.get("인수인정보", []):
             if (u.get("actsen") or "").strip() == "대표" or u["rcept_no"] not in leads:
@@ -256,6 +345,46 @@ def fetch_registrations(dart, db):
             db.securities([parse.equity_rs(k, general.get(k["rcept_no"], {}), leads.get(k["rcept_no"]))
                            for k in groups_.get("증권의종류", [])])
         mark(db, [rc for rc, _ in fl])
+
+
+def save_underwriters(db, rows):
+    """인수인정보 → underwritings (대표·인수단, 인수금액, 수수료)"""
+    out = []
+    for u in rows:
+        name = text(u.get("actnmn"))
+        if not name:
+            continue
+        amt = num(u.get("udtamt"))
+        fee_t = text(u.get("udtprc"))
+        rate = None
+        if fee_t:
+            m = re.search(r"([\d.]+)\s*%", fee_t)
+            if m:
+                rate = float(m.group(1))
+            elif amt and num(fee_t):
+                rate = round(num(fee_t) / amt * 100, 4)
+        out.append((u["rcept_no"], u["corp_code"], name, text(u.get("actsen")) or "인수",
+                    text(u.get("tm")) or text(u.get("stksen")) or "", amt, fee_t, rate, text(u.get("udtmth"))))
+    uniq = {(r[0], r[2], r[3], r[4]): r for r in out}
+    db.many("""insert into underwritings (rcept_no, corp_code, underwriter, role, series, amount, fee_text, fee_rate, method)
+               values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               on conflict (rcept_no, underwriter, role, series) do update set amount=excluded.amount,
+                 fee_text=excluded.fee_text, fee_rate=excluded.fee_rate, method=excluded.method""", list(uniq.values()))
+
+
+def backfill_underwriters(dart, db):
+    """이미 처리한 증권신고서의 인수단을 회사별로 다시 받아 채움 (한 번만)"""
+    groups = db.q("""select corp_code, kind, min(rcept_dt), max(rcept_dt) from filings
+                     where kind in ('BOND_RS','EQUITY_RS') and status='done' group by 1,2""")
+    todo = [g for g in groups if not db.done(f"uw:{g[1]}:{g[0]}")]
+    print(f"인수단 보강: {len(todo)}개 (회사, 유형)")
+    for i, (corp, kind, d0, d1) in enumerate(todo, 1):
+        j = dart.json("bdRs" if kind == "BOND_RS" else "estkRs", corp_code=corp,
+                      bgn_de=f"{d0:%Y%m%d}", end_de=f"{d1:%Y%m%d}")
+        save_underwriters(db, [u for g in j.get("group", []) if g["title"] == "인수인정보" for u in g.get("list", [])])
+        db.log(f"uw:{kind}:{corp}")
+        if i % 300 == 0:
+            print(f"  {i}/{len(todo)} (호출 {dart.calls})")
 
 
 # ── 4) RCPS 판별 ──────────────────────────────────────────────────────
@@ -343,55 +472,74 @@ def save_fins(db, fins):
 
 # ── 6) 정정·중복 정리 ─────────────────────────────────────────────────
 DEDUPE_SQL = """
--- 같은 출처·같은 키는 최신 접수본만
-update securities s set superseded = exists (
-  select 1 from securities t where t.source = s.source and t.corp_code = s.corp_code
-    and t.dkey = s.dkey and t.rcept_no > s.rcept_no)
-where s.source in ('decision','bond_rs','equity_rs');
+-- 숨김(superseded) 최종값을 임시 테이블에서 계산하고, 실제로 바뀌는 행만 반영한다
+-- (전 행을 매번 다시 쓰면 무료 DB에서 낡은 행이 쌓여 용량 한도를 넘음)
+drop table if exists _sup;
+create temp table _sup as
+  select id, source, corp_code, dkey, rcept_no, sec_type, amount, method, rcept_dt, issue_date, maturity_date,
+         false as sup
+  from securities;
+create index on _sup (corp_code);
 
-update securities set superseded = false where source = 'periodic';
+-- 같은 출처·같은 키는 최신 접수본만
+update _sup s set sup = true
+where s.source in ('decision','bond_rs','equity_rs') and exists (
+  select 1 from _sup t where t.source = s.source and t.corp_code = s.corp_code
+    and t.dkey = s.dkey and t.rcept_no > s.rcept_no);
 
 -- 지분증권 신고서 중 IPO가 아닌 것(상장사의 공모증자)은 숨김
 --  · 주주배정 방식이거나
 --  · 신고 시점에 이미 상장돼 있었거나 (KIND 상장일 기준)
 --  · 상장일을 모를 때(상장폐지 등): 같은 시기 유상증자 결정 공시가 있으면
-update securities r set superseded = true
-where r.source = 'equity_rs' and (
+update _sup r set sup = true
+where r.source = 'equity_rs' and not r.sup and (
   coalesce(r.method, '') like '%%주주%%'
   or exists (select 1 from companies c where c.corp_code = r.corp_code
                and c.listed_on is not null and c.listed_on < r.rcept_dt - 10)
   or (not exists (select 1 from companies c where c.corp_code = r.corp_code
                     and c.listed_on between r.rcept_dt - 10 and r.rcept_dt + 200)
-      and exists (select 1 from securities d where d.source = 'decision' and d.sec_type in ('EQUITY','RCPS')
-                    and not d.superseded and d.amount > 0 and d.corp_code = r.corp_code
+      and exists (select 1 from _sup d where d.source = 'decision' and d.sec_type in ('EQUITY','RCPS')
+                    and not d.sup and d.amount > 0 and d.corp_code = r.corp_code
                     and abs(d.rcept_dt - r.rcept_dt) <= 120)));
 
 -- 반대로 IPO로 남은 건과 같은 시기의 유상증자 결정(상장 전 공모)은 유상증자 집계에서 제외
-update securities d set superseded = true
-where d.source = 'decision' and d.sec_type = 'EQUITY' and exists (
-  select 1 from securities i where i.sec_type = 'IPO' and not i.superseded
+update _sup d set sup = true
+where d.source = 'decision' and d.sec_type = 'EQUITY' and not d.sup and exists (
+  select 1 from _sup i where i.sec_type = 'IPO' and not i.sup
     and i.corp_code = d.corp_code and abs(i.rcept_dt - d.rcept_dt) <= 120);
 
 -- 공모 CB/BW/EB 신고서는 결정 공시와 중복
-update securities r set superseded = true
-where r.source = 'bond_rs' and r.sec_type in ('CB','BW','EB') and exists (
-  select 1 from securities d where d.source = 'decision' and not d.superseded
+update _sup r set sup = true
+where r.source = 'bond_rs' and r.sec_type in ('CB','BW','EB') and not r.sup and exists (
+  select 1 from _sup d where d.source = 'decision' and not d.sup
     and d.corp_code = r.corp_code and d.sec_type = r.sec_type and d.amount = r.amount);
 
 -- 정기보고서 행과 공시 행이 같은 발행이면: 등급·상환 여부·금리를 공시 행에 옮기고 정기보고서 행은 숨김
-with m as (
-  select distinct on (p.id) p.id as pid, x.id as xid, p.rating, p.grade, p.repaid, p.repaid_asof, p.coupon
-  from securities p join securities x
+drop table if exists _m;
+create temp table _m as
+  select distinct on (p.id) p.id as pid, x.id as xid
+  from _sup p join _sup x
     on x.corp_code = p.corp_code and x.sec_type = p.sec_type and x.amount = p.amount
-   and x.source <> 'periodic' and not x.superseded
+   and x.source <> 'periodic' and not x.sup
    and (abs(x.issue_date - p.issue_date) <= 10 or x.maturity_date = p.maturity_date)
   where p.source = 'periodic'
-  order by p.id, abs(x.issue_date - p.issue_date))
-, u as (
-  update securities x set rating = coalesce(m.rating, x.rating), grade = coalesce(m.grade, x.grade), repaid = m.repaid,
-         repaid_asof = m.repaid_asof, coupon = coalesce(x.coupon, m.coupon)
-  from m where x.id = m.xid returning m.pid)
-update securities set superseded = true where id in (select pid from u);
+  order by p.id, abs(x.issue_date - p.issue_date);
+
+update securities x set rating = coalesce(pp.rating, x.rating), grade = coalesce(pp.grade, x.grade),
+       repaid = pp.repaid, repaid_asof = pp.repaid_asof, coupon = coalesce(x.coupon, pp.coupon)
+from _m join securities pp on pp.id = _m.pid
+where x.id = _m.xid
+  and (x.rating is distinct from coalesce(pp.rating, x.rating) or x.grade is distinct from coalesce(pp.grade, x.grade)
+       or x.repaid is distinct from pp.repaid or x.repaid_asof is distinct from pp.repaid_asof
+       or x.coupon is distinct from coalesce(x.coupon, pp.coupon));
+
+update _sup set sup = true where id in (select pid from _m);
+
+-- 바뀐 행만 반영
+update securities s set superseded = t.sup from _sup t
+where s.id = t.id and s.superseded is distinct from t.sup;
+drop table _sup;
+drop table _m;
 """
 
 
@@ -418,6 +566,7 @@ def main():
         print("IPO 보정: 지분증권 신고서 목록(C001)을 따로 훑습니다")
     try:
         update_listing_dates(db)
+        update_quotes(db)
         # 유형별로 목록 → 상세를 바로 이어서 처리 (초기 적재 때 화면에 빨리 데이터가 보이도록)
         scan_lists(dart, db, since, ("B",))
         fetch_decisions(dart, db)
@@ -427,6 +576,9 @@ def main():
         fetch_registrations(dart, db)
         db.q(DEDUPE_SQL)
         scan_lists(dart, db, since, ("A",))
+        backfill_underwriters(dart, db)
+        scan_lists(dart, db, since, ("I",))
+        fetch_balances(dart, db)
         half = dart.left // 2
         fetch_periodic(dart, db, half)
         fetch_financials(dart, db, dart.left)

@@ -17,7 +17,9 @@ from psycopg.types.json import Jsonb
 from .db import pool, fetch_all, fetch_one, execute
 from .models import (Health, Meta, TypeInfo, MacroPoint, Security, SecurityPage, MaturityBucket,
                      CompanyHit, Company, Financial, Statements, StatementLine, Source,
-                     StatementCompare, CompareSection, CompareLine, Benchmark, BenchMetric, BenchPeer)
+                     StatementCompare, CompareSection, CompareLine, Benchmark, BenchMetric, BenchPeer,
+                     OverhangItem, OverhangCompany, OverhangPage,
+                     CompanyOverhang, CompanyOverhangItem, League, LeagueRow, LeagueDeal)
 
 TYPES = {"SB": "회사채", "CB": "전환사채", "BW": "신주인수권부사채", "EB": "교환사채",
          "RCPS": "상환전환우선주", "EQUITY": "유상증자", "IPO": "IPO", "CP": "기업어음",
@@ -333,6 +335,296 @@ def benchmark(sec_id: str, window_days: int = Query(180, ge=30, le=730, descript
                        amount=r["amount"], grade=r["grade"], tenor=tenor(r), coupon=r["coupon"], ytm=r["ytm"],
                        refix_ratio=refix(r), dilution_pct=r["dilution_pct"], method=r["method"]) for r in near]
     return Benchmark(id=sec_id, sec_type=st, basis=" · ".join(basis), n=len(rows), metrics=metrics, peers=peers)
+
+
+# ── 메자닌 오버행 ──────────────────────────────────────────────────────
+def _plain(name):
+    """'(주)가온전선 기명식 보통주' → '가온전선'"""
+    n = re.sub(r"\(주\)|㈜|주식회사|기명식|무기명식|보통주식?|우선주식?|의결권 ?있는|주권|\s", "", name or "")
+    return n
+
+
+def _series_key(v):
+    m = re.search(r"\d+", str(v or ""))
+    return str(int(m.group())) if m else None
+
+
+def _balances(corp_codes=None):
+    """(corp_code, 회차) → 최신 잔액·전환가·주식수 (각 항목별로 가장 최근에 공시된 값)"""
+    rows = fetch_all("""select corp_code, series, rcept_dt, rcept_no, kind, remaining, conv_price, shares
+                        from mezz_balance where (%(c)s::text[] is null or corp_code = any(%(c)s))
+                        order by rcept_dt desc, rcept_no desc""", {"c": corp_codes})
+    out = {}
+    for r in rows:
+        b = out.setdefault((r["corp_code"], r["series"]), {"remaining": None, "conv_price": None, "shares": None,
+                                                           "asof": r["rcept_dt"], "rcept_no": r["rcept_no"]})
+        for k in ("remaining", "conv_price", "shares"):
+            if b[k] is None and r[k] is not None:
+                b[k] = float(r[k])
+                if k == "remaining":
+                    b["remaining_asof"] = r["rcept_dt"]
+    return out
+
+
+def _apply_balance(r, bal):
+    """발행 정보 r에 최신 잔액을 반영 → (잔액, 현재 전환가, 남은 주식수, 기준일, 출처)"""
+    amt, cp0 = float(r["amount"]), float(r["conv_price"]) if r["conv_price"] else None
+    b = bal.get((r["corp_code"], _series_key(r["series"])))
+    if b and b.get("asof") and r["issue_date"] and b["asof"] >= r["issue_date"]:
+        rem = b["remaining"] if b["remaining"] is not None else amt
+        cp = b["conv_price"] or cp0
+        sh = b["shares"] if b["shares"] is not None and b["remaining"] is not None else (rem / cp if cp else None)
+        return rem, cp, sh, b.get("remaining_asof") or b["asof"], "공시"
+    sh = float(r["shares"]) if r["shares"] else (amt / cp0 if cp0 else None)
+    return amt, cp0, sh, None, "발행 기준"
+
+
+@app.get("/api/overhang", response_model=OverhangPage, tags=["monitor"],
+         summary="메자닌(CB·BW·EB) 잠재 물량 — 주가 대비 전환가, 희석률, 청구 일정")
+def overhang(types: Optional[str] = Query("CB,BW,EB", description="CB,BW,EB 중"),
+             window: Literal["all", "open", "3m", "6m", "12m"] = Query(
+                 "all", description="open: 지금 청구 가능 / 3m·6m·12m: 그 기간 안에 청구 시작"),
+             itm: bool = Query(False, description="true면 종가 ≥ 전환가(이익 구간)만"),
+             market: Optional[Literal["KOSPI", "KOSDAQ"]] = Query(None),
+             q: Optional[str] = Query(None, description="회사명 일부"),
+             sort: Literal["start", "dilution", "moneyness", "value"] = Query("start"),
+             limit: int = Query(100, ge=1, le=1000)):
+    """잔존(만기 전·미상환·청구기간 미종료) CB·BW·EB를 최근 거래일 주가와 비교합니다.
+    EB는 교환 대상 회사의 주가를 씁니다. 주식수는 발행 시점 기준이라 이후 일부 전환·리픽싱은 반영되지 않습니다."""
+    tps = [t for t in types_param(types) if t in ("CB", "BW", "EB")]
+    rows = fetch_all("""
+        select s.id, s.corp_code, c.corp_name, c.stock_code, s.sec_type, s.offering, s.name, s.series,
+               s.issue_date, s.maturity_date, s.amount, s.conv_price, s.refix_floor, s.conv_start, s.conv_end,
+               s.underlying, s.shares
+        from securities s join companies c using (corp_code)
+        where not s.superseded and s.sec_type = any(%(t)s) and s.amount > 0 and s.conv_price > 0
+          and s.maturity_date >= current_date and coalesce(s.repaid, '') <> '상환'
+          and (s.conv_end is null or s.conv_end >= current_date)
+          and (%(q)s::text is null or c.corp_name ilike '%%' || %(q)s || '%%')""",
+        {"t": tps, "q": (q or "").strip() or None})
+    qs = fetch_all("select stock_code, name, market, bas_dd, close, list_shrs from quotes")
+    bal = _balances()
+    by_code = {r["stock_code"]: r for r in qs}
+    by_name = {_plain(r["name"]): r for r in qs}
+    as_of = max((r["bas_dd"] for r in qs), default=None)
+    today = date.today()
+    items = []
+    for r in rows:
+        qt = by_code.get(r["stock_code"])
+        if r["sec_type"] == "EB":                         # 교환 대상이 다른 회사면 그 회사 주가
+            u = _plain(r["underlying"])
+            if u and u != _plain(r["corp_name"]):
+                qt = by_name.get(u) or next((v for k, v in by_name.items() if k and (k in u or u in k) and len(k) >= 2), None)
+        if not qt or not qt["close"]:
+            continue
+        rem, cp, sh, asof, src = _apply_balance(r, bal)
+        if not rem or rem <= 0 or not cp or not sh:   # 전량 전환·상환
+            continue
+        close = float(qt["close"])
+        lst = float(qt["list_shrs"]) if qt["list_shrs"] else None
+        start = r["conv_start"]
+        status = "청구 가능" if not start or start <= today else "청구 전"
+        dts = (start - today).days if start and start > today else 0
+        if window == "open" and status != "청구 가능":
+            continue
+        if window in ("3m", "6m", "12m") and not (status == "청구 전" and dts <= {"3m": 92, "6m": 183, "12m": 366}[window]):
+            continue
+        mny = round(close / cp * 100, 1)
+        if itm and mny < 100:
+            continue
+        if market and qt["market"] != market:
+            continue
+        dil = round(sh / lst * 100, 2) if lst else None
+        warn = ("희석률이 비정상적으로 큼: 발행 뒤 주식 병합·액면 변경 등으로 전환가·주식수가 바뀌었을 수 있음" if dil and dil > 100
+                else "주가와 전환가 차이가 큼: 액면 변경·병합 또는 리픽싱 반영 전일 수 있음" if mny > 400 or mny < 10 else None)
+        items.append(OverhangItem(
+            **{k: r[k] for k in ("id", "corp_code", "corp_name", "sec_type", "offering", "name", "series", "issue_date",
+                                 "maturity_date", "amount", "conv_price", "refix_floor", "conv_start", "conv_end", "underlying")},
+            stock_code=qt["stock_code"], market=qt["market"], ref_name=qt["name"], close=close, moneyness=mny,
+            shares=round(sh), list_shrs=lst, dilution=dil,
+            value=round(sh * close), status=status, days_to_start=dts, warn=warn,
+            remaining=rem, balance_asof=asof, balance_source=src, conv_price_now=cp))
+    key = {"start": lambda i: (i.status != "청구 전", i.days_to_start or 0),
+           "dilution": lambda i: (bool(i.warn), -(i.dilution or 0)), "moneyness": lambda i: (bool(i.warn), -(i.moneyness or 0)),
+           "value": lambda i: (bool(i.warn), -(i.value or 0))}[sort]
+    items.sort(key=key)
+    comp = {}
+    for i in items:
+        if i.ref_name and i.sec_type == "EB" and i.stock_code and i.corp_name not in i.ref_name and _plain(i.ref_name) != _plain(i.corp_name):
+            continue                                       # 다른 회사 주식으로 교환되는 EB는 발행사 희석에서 제외
+        c = comp.setdefault(i.corp_code, dict(corp_code=i.corp_code, corp_name=i.corp_name, stock_code=i.stock_code,
+                                              market=i.market, count=0, amount=0.0, shares=0.0, itm_shares=0.0,
+                                              value=0.0, next_start=None, close=i.close, list_shrs=i.list_shrs, warn=False))
+        c["warn"] = c["warn"] or bool(i.warn)
+        c["count"] += 1; c["amount"] += i.amount or 0; c["shares"] += i.shares or 0; c["value"] += i.value or 0
+        if (i.moneyness or 0) >= 100:
+            c["itm_shares"] += i.shares or 0
+        if i.status == "청구 전" and (c["next_start"] is None or i.conv_start < c["next_start"]):
+            c["next_start"] = i.conv_start
+    companies = []
+    for c in comp.values():
+        lst = c.pop("list_shrs")
+        companies.append(OverhangCompany(**c, dilution=round(c["shares"] / lst * 100, 2) if lst else None))
+    companies.sort(key=lambda c: (c.warn, -(c.dilution or 0)))
+    ok = [i for i in items if not i.warn]                 # 합계는 확인 필요 건 제외
+    return OverhangPage(as_of=as_of, total=len(items), total_value=sum(i.value or 0 for i in ok),
+                        itm_count=sum((i.moneyness or 0) >= 100 for i in ok),
+                        upcoming_3m_value=sum(i.value or 0 for i in ok if i.status == "청구 전" and i.days_to_start <= 92),
+                        items=items[:limit], companies=companies[:limit])
+
+
+@app.get("/api/companies/{corp_code}/overhang", response_model=CompanyOverhang, tags=["company"],
+         summary="회사별 전 회차 메자닌 잔액과 잠재 오버행")
+def company_overhang(corp_code: str):
+    """이 회사가 발행한 CB·BW·EB 전 회차: 발행액, 전환·상환으로 줄어든 금액, 최신 잔액(행사·조정·만기전취득 공시 기준),
+    현재 전환가, 남은 주식수, 희석률. 합계는 이 회사 주식으로 바뀔 수 있는 잔존분만 더합니다."""
+    rows = fetch_all("""
+        select s.id, s.corp_code, c.corp_name, c.stock_code, s.sec_type, s.offering, s.name, s.series, s.issue_date,
+               s.maturity_date, s.amount, s.conv_price, s.refix_floor, s.conv_start, s.conv_end, s.underlying, s.shares,
+               s.repaid, s.rcept_no
+        from securities s join companies c using (corp_code)
+        where not s.superseded and s.corp_code = %(c)s and s.sec_type in ('CB','BW','EB') and s.amount > 0
+        order by s.issue_date desc""", {"c": corp_code})
+    q = fetch_one("""select q.close, q.list_shrs, q.bas_dd from quotes q join companies c on c.stock_code = q.stock_code
+                     where c.corp_code = %(c)s""", {"c": corp_code}) or {}
+    bal = _balances([corp_code])
+    close = float(q["close"]) if q.get("close") else None
+    lst = float(q["list_shrs"]) if q.get("list_shrs") else None
+    today = date.today()
+    items, tot_rem, tot_sh = [], 0.0, 0.0
+    for r in rows:
+        rem, cp, sh, asof, src = _apply_balance(r, bal)
+        own = r["sec_type"] != "EB" or not _plain(r["underlying"]) or _plain(r["corp_name"]) in _plain(r["underlying"]) \
+            or "자기" in (r["underlying"] or "")
+        if r["maturity_date"] and r["maturity_date"] < today:
+            state = "만기 경과"
+        elif (r["repaid"] or "") == "상환":
+            state = "상환"
+        elif rem is not None and rem <= 0:
+            state = "전량 전환·상환"
+        elif r["conv_end"] and r["conv_end"] < today:
+            state = "청구기간 종료"
+        else:
+            state = "잔존"
+        live = state == "잔존"
+        if live and own:
+            tot_rem += rem or 0
+            tot_sh += sh or 0
+        items.append(CompanyOverhangItem(
+            id=r["id"], sec_type=r["sec_type"], series=r["series"], name=r["name"], offering=r["offering"],
+            issue_date=r["issue_date"], maturity_date=r["maturity_date"], amount=r["amount"],
+            conv_price0=r["conv_price"], conv_price=cp, refix_floor=r["refix_floor"], conv_start=r["conv_start"],
+            conv_end=r["conv_end"], remaining=rem if live else 0, released=(float(r["amount"]) - (rem or 0)) if rem is not None else None,
+            shares=round(sh) if live and sh else 0, dilution=round(sh / lst * 100, 2) if live and own and sh and lst else None,
+            moneyness=round(close / cp * 100, 1) if live and own and close and cp else None,
+            own_stock=own, underlying=r["underlying"], state=state, balance_asof=asof, balance_source=src,
+            dart_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={r['rcept_no']}" if r["rcept_no"] else None))
+    return CompanyOverhang(corp_code=corp_code, close=close, list_shrs=lst, as_of=q.get("bas_dd"),
+                           remaining=tot_rem, shares=round(tot_sh), dilution=round(tot_sh / lst * 100, 2) if lst else None,
+                           value=round(tot_sh * close) if close else None, items=items)
+
+
+# ── 리그테이블 ─────────────────────────────────────────────────────────
+LeagueCat = Literal["bond", "equity", "ipo"]
+GRADE_BANDS = {"AA": ("AAA", "AA+", "AA", "AA-"), "A": ("A+", "A", "A-"),
+               "BBB": ("BBB+", "BBB", "BBB-", "BB+", "BB", "BB-", "B+", "B", "B-", "CCC", "CC", "C", "D")}
+
+
+def _firm(n):
+    return re.sub(r"\(주\)|㈜|주식회사|\s", "", n or "")
+
+
+def _league_deals(cat, d0, d1, fin, band, firm=None):
+    """카테고리별 딜과 인수단. 반환: [(deal dict, [인수단 행])]"""
+    if cat == "bond":
+        where = "s.source = 'bond_rs' and s.sec_type = 'SB' and not s.superseded and coalesce(s.offering,'공모') = '공모'"
+    elif cat == "ipo":
+        where = "s.source = 'equity_rs' and s.sec_type = 'IPO' and not s.superseded"
+    else:   # 상장사 공모 유상증자: IPO가 아닌 지분증권 신고서 (같은 신고의 정정은 최신만)
+        where = """s.source = 'equity_rs' and s.superseded and s.id in (
+                     select distinct on (corp_code, dkey) id from securities where source = 'equity_rs'
+                     order by corp_code, dkey, rcept_no desc)
+                   and not exists (select 1 from securities i where i.sec_type = 'IPO' and not i.superseded
+                                     and i.corp_code = s.corp_code and i.dkey = s.dkey)"""
+    deals = fetch_all(f"""
+        select s.id, s.rcept_no, s.corp_code, c.corp_name, coalesce(s.issue_date, s.rcept_dt) as d, s.amount, s.grade,
+               s.series, s.maturity_date, s.coupon, s.conv_price, s.method, s.name, s.underwriter
+        from securities s join companies c using (corp_code)
+        where {where} and s.amount > 0 and coalesce(s.issue_date, s.rcept_dt) between %(d0)s and %(d1)s
+          and (%(fin)s = 'include' or (c.corp_name ~ %(re)s) = (%(fin)s = 'only'))
+          and (%(band)s::text[] is null or s.grade = any(%(band)s))""",
+        {"d0": d0, "d1": d1, "fin": fin, "re": FIN_RE, "band": list(GRADE_BANDS[band]) if band else None})
+    uw = fetch_all("select rcept_no, underwriter, role, series, amount, fee_rate from underwritings where rcept_no = any(%(r)s)",
+                   {"r": list({d["rcept_no"] for d in deals})})
+    by = {}
+    for u in uw:
+        by.setdefault(u["rcept_no"], []).append(u)
+    out = []
+    for d in deals:
+        us = by.get(d["rcept_no"], [])
+        key = d["series"] if cat == "bond" else None
+        mine = [u for u in us if (u["series"] or "") == (key or "")] if key and any((u["series"] or "") == key for u in us) else us
+        leads = sorted({_firm(u["underwriter"]) for u in mine if "대표" in (u["role"] or "")})
+        if not leads and d["underwriter"]:
+            leads = [_firm(d["underwriter"])]
+        if firm and _firm(firm) not in leads and not any(_firm(u["underwriter"]) == _firm(firm) for u in mine):
+            continue
+        out.append((d, leads, mine))
+    return out
+
+
+@app.get("/api/league", response_model=League, tags=["macro"], summary="주관사 리그테이블")
+def league(category: LeagueCat = Query("bond", description="bond 공모 회사채 / equity 공모 유상증자 / ipo"),
+           year: Optional[int] = Query(None, ge=2020, description="연도 (생략 시 2020년~전체)"),
+           grade: Optional[Literal["AA", "A", "BBB"]] = Query(None, description="회사채 등급 구간: AA 이상 / A / BBB 이하"),
+           fin: Literal["exclude", "include", "only"] = FinQ):
+    """대표주관 금액(공동 대표주관은 균등 배분) 순위. 인수 금액은 인수단 참여분 포함, 수수료율은 인수금액 가중 평균."""
+    def table(y):
+        d0, d1 = (date(y, 1, 1), date(y, 12, 31)) if y else (SINCE, date.today())
+        agg = {}
+        deals = _league_deals(category, d0, d1, fin, grade if category == "bond" else None)
+        for d, leads, us in deals:
+            for f in leads:
+                a = agg.setdefault(f, {"lead": 0.0, "deals": 0, "uw": 0.0, "fee_w": 0.0, "fee_a": 0.0})
+                a["lead"] += float(d["amount"]) / len(leads)
+                a["deals"] += 1
+            for u in us:
+                f = _firm(u["underwriter"])
+                a = agg.setdefault(f, {"lead": 0.0, "deals": 0, "uw": 0.0, "fee_w": 0.0, "fee_a": 0.0})
+                amt = float(u["amount"] or 0)
+                a["uw"] += amt
+                if u["fee_rate"] is not None and amt and 0 < float(u["fee_rate"]) < 20:
+                    a["fee_w"] += float(u["fee_rate"]) * amt
+                    a["fee_a"] += amt
+        total = sum(float(d["amount"]) for d, _, _ in deals)
+        ranked = sorted(((f, a) for f, a in agg.items() if a["lead"] > 0), key=lambda x: -x[1]["lead"])
+        return deals, total, ranked
+    deals, total, ranked = table(year)
+    prev = {f: i for i, (f, _) in enumerate(table(year - 1)[2], 1)} if year and year > 2020 else {}
+    rows = [LeagueRow(rank=i, underwriter=f, lead_amount=round(a["lead"]), deals=a["deals"],
+                      share=round(a["lead"] / total * 100, 2) if total else 0, underwritten=round(a["uw"]),
+                      fee_rate=round(a["fee_w"] / a["fee_a"], 3) if a["fee_a"] else None, prev_rank=prev.get(f))
+            for i, (f, a) in enumerate(ranked, 1)]
+    return League(category=category, period=str(year) if year else f"{SINCE.year}~", total_amount=total,
+                  total_deals=len(deals), rows=rows)
+
+
+@app.get("/api/league/deals", response_model=list[LeagueDeal], tags=["macro"], summary="주관사별 딜 목록")
+def league_deals(category: LeagueCat = Query("bond"), underwriter: str = Query(..., description="증권사 이름"),
+                 year: Optional[int] = Query(None, ge=2020), grade: Optional[Literal["AA", "A", "BBB"]] = Query(None),
+                 fin: Literal["exclude", "include", "only"] = FinQ):
+    d0, d1 = (date(year, 1, 1), date(year, 12, 31)) if year else (SINCE, date.today())
+    out = []
+    for d, leads, _ in _league_deals(category, d0, d1, fin, grade if category == "bond" else None, firm=underwriter):
+        if category == "bond":
+            tenor = round((d["maturity_date"] - d["d"]).days / 365.25, 1) if d["maturity_date"] and d["d"] else None
+            detail = " · ".join(x for x in (d["series"] and f"{d['series']}회", tenor and f"{tenor}년", d["coupon"] is not None and f"{float(d['coupon']):.2f}%") if x)
+        else:
+            detail = " · ".join(x for x in (d["conv_price"] and f"{float(d['conv_price']):,.0f}원", d["method"]) if x)
+        out.append(LeagueDeal(rcept_no=d["rcept_no"], corp_code=d["corp_code"], corp_name=d["corp_name"], issue_date=d["d"],
+                              amount=d["amount"], leads=leads, grade=d["grade"], detail=detail or None,
+                              dart_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"))
+    return sorted(out, key=lambda x: x.issue_date or date.min, reverse=True)
 
 
 @app.get("/api/companies", response_model=list[CompanyHit], tags=["company"], summary="회사 검색")

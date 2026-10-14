@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 from .db import pool, fetch_all, fetch_one, execute
 from .models import (Health, Meta, TypeInfo, MacroPoint, Security, SecurityPage, MaturityBucket,
                      CompanyHit, Company, Financial, Statements, StatementLine, Source,
-                     StatementCompare, CompareSection, CompareLine)
+                     StatementCompare, CompareSection, CompareLine, Benchmark, BenchMetric, BenchPeer)
 
 TYPES = {"SB": "회사채", "CB": "전환사채", "BW": "신주인수권부사채", "EB": "교환사채",
          "RCPS": "상환전환우선주", "EQUITY": "유상증자", "IPO": "IPO", "CP": "기업어음",
@@ -192,7 +192,7 @@ def maturities(types: Optional[str] = TypesQ, fin: Literal["exclude", "include",
 SEC_COLS = f"""s.id, s.corp_code, c.corp_name, c.stock_code, c.corp_cls, s.sec_type, s.source,
   s.offering, s.name, s.series, s.rcept_dt, s.issue_date, s.amount, s.coupon, s.ytm,
   s.maturity_date, s.maturity_date - current_date as days_left, s.conv_price, s.refix_floor,
-  s.conv_start, s.conv_end, s.underlying, s.shares, s.dilution_pct, s.rating, s.repaid,
+  s.conv_start, s.conv_end, s.underlying, s.shares, s.dilution_pct, s.rating, s.grade, s.repaid,
   {HYBRID} as hybrid,
   s.repaid_asof, s.method, s.underwriter,
   case when s.rcept_no is not null then 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' || s.rcept_no end as dart_url"""
@@ -243,6 +243,98 @@ def securities(types: Optional[str] = TypesQ,
 
 
 # ── company ────────────────────────────────────────────────────────────
+# ── 발행조건 벤치마크 ──────────────────────────────────────────────────
+def _tenor_bucket(y):
+    if y is None:
+        return None
+    for b, hi in ((1, 1.5), (2, 2.5), (3, 4), (5, 6), (7, 8.5)):
+        if y <= hi:
+            return b
+    return 10
+
+
+def _pct(vals, q):
+    if not vals:
+        return None
+    k = (len(vals) - 1) * q
+    lo, hi = int(k), min(int(k) + 1, len(vals) - 1)
+    return round(vals[lo] + (vals[hi] - vals[lo]) * (k - lo), 3)
+
+
+def _metric(key, label, unit, value, vals):
+    vals = sorted(v for v in vals if v is not None)
+    pr = (round(sum(v < value for v in vals) / len(vals) * 100 + sum(v == value for v in vals) / len(vals) * 50, 1)
+          if vals and value is not None else None)
+    return BenchMetric(key=key, label=label, unit=unit, value=value, n=len(vals),
+                       p10=_pct(vals, .1), p25=_pct(vals, .25), p50=_pct(vals, .5),
+                       p75=_pct(vals, .75), p90=_pct(vals, .9), percentile=pr)
+
+
+@app.get("/api/securities/{sec_id}/benchmark", response_model=Benchmark, tags=["monitor"],
+         summary="발행조건 벤치마크 (비슷한 증권과 비교)")
+def benchmark(sec_id: str, window_days: int = Query(180, ge=30, le=730, description="발행일 ± 기간(일)")):
+    """회사채: 같은 등급·비슷한 만기 / CB·BW·EB: 같은 유형 / 유상증자·RCPS: 같은 증자 방식.
+    모두 발행일 ± window_days 안에서 비교하며, 금융회사 발행분은 대상이 금융회사일 때만 비교에 넣습니다."""
+    t = fetch_one(f"""select s.*, c.corp_name, (c.corp_name ~ %(re)s) as is_fin from securities s
+                      join companies c using (corp_code) where s.id = %(id)s""", {"id": sec_id, "re": FIN_RE})
+    if not t:
+        raise HTTPException(404, "증권을 찾을 수 없습니다")
+    if not t["issue_date"]:
+        raise HTTPException(422, "발행일이 없어 비교할 수 없습니다")
+    st = t["sec_type"]
+    cond, p, basis = ["s.sec_type = %(st)s"], {"st": st}, [TYPES.get(st, st)]
+    if st in ("SB", "CP", "STB"):
+        if t["grade"]:
+            cond.append("s.grade = %(g)s"); p["g"] = t["grade"]; basis.append(f"등급 {t['grade']}")
+        tb = _tenor_bucket((t["maturity_date"] - t["issue_date"]).days / 365.25) if t["maturity_date"] else None
+        if tb and st == "SB":
+            basis.append(f"만기 약 {tb}년" if tb < 10 else "만기 10년 이상")
+    elif st in ("EQUITY", "RCPS") and t["method"]:
+        cond.append("s.method = %(m)s"); p["m"] = t["method"]; basis.append(t["method"])
+    elif st in ("CB", "BW", "EB") and t["offering"]:
+        cond.append("s.offering = %(off)s"); p["off"] = t["offering"]; basis.append(t["offering"])
+    if not t["is_fin"]:
+        cond.append("not (c.corp_name ~ %(re)s)"); p["re"] = FIN_RE; basis.append("금융회사 제외")
+    basis.append(f"발행일 ±{window_days}일")
+    p.update(d0=t["issue_date"], w=window_days, id=sec_id)
+    rows = fetch_all(f"""
+        select s.id, s.corp_code, c.corp_name, s.issue_date, s.amount, s.grade, s.coupon, s.ytm, s.method,
+               s.dilution_pct, s.maturity_date, s.conv_price, s.refix_floor
+        from securities s join companies c using (corp_code)
+        where not s.superseded and s.amount > 0 and s.id <> %(id)s and {" and ".join(cond)}
+          and s.issue_date between %(d0)s::date - %(w)s and %(d0)s::date + %(w)s""", p)
+
+    def tenor(r):
+        return round((r["maturity_date"] - r["issue_date"]).days / 365.25, 2) if r["maturity_date"] and r["issue_date"] else None
+
+    def refix(r):
+        return round(float(r["refix_floor"]) / float(r["conv_price"]) * 100, 1) if r["refix_floor"] and r["conv_price"] else None
+
+    if st == "SB" and t["maturity_date"]:                # 만기 구간이 같은 것만
+        tb = _tenor_bucket(tenor(t))
+        rows = [r for r in rows if _tenor_bucket(tenor(r)) == tb]
+    f = lambda k: [float(r[k]) if r[k] is not None else None for r in rows]
+    tv = lambda k: float(t[k]) if t[k] is not None else None
+    if st in ("SB", "CP", "STB"):
+        metrics = [_metric("coupon", "표면금리", "%", tv("coupon"), f("coupon")),
+                   _metric("tenor", "만기", "년", tenor(t), [tenor(r) for r in rows]),
+                   _metric("amount", "발행금액", "원", tv("amount"), f("amount"))]
+    elif st in ("CB", "BW", "EB"):
+        metrics = [_metric("coupon", "표면이자율", "%", tv("coupon"), f("coupon")),
+                   _metric("ytm", "만기이자율", "%", tv("ytm"), f("ytm")),
+                   _metric("refix_ratio", "리픽싱 하한 / 전환가", "%", refix(t), [refix(r) for r in rows]),
+                   _metric("tenor", "만기", "년", tenor(t), [tenor(r) for r in rows]),
+                   _metric("amount", "발행금액", "원", tv("amount"), f("amount"))]
+    else:
+        metrics = [_metric("amount", "발행금액", "원", tv("amount"), f("amount")),
+                   _metric("dilution_pct", "희석률", "%", tv("dilution_pct"), f("dilution_pct"))]
+    near = sorted(rows, key=lambda r: abs((r["issue_date"] - t["issue_date"]).days))[:15]
+    peers = [BenchPeer(id=r["id"], corp_code=r["corp_code"], corp_name=r["corp_name"], issue_date=r["issue_date"],
+                       amount=r["amount"], grade=r["grade"], tenor=tenor(r), coupon=r["coupon"], ytm=r["ytm"],
+                       refix_ratio=refix(r), dilution_pct=r["dilution_pct"], method=r["method"]) for r in near]
+    return Benchmark(id=sec_id, sec_type=st, basis=" · ".join(basis), n=len(rows), metrics=metrics, peers=peers)
+
+
 @app.get("/api/companies", response_model=list[CompanyHit], tags=["company"], summary="회사 검색")
 def search_companies(q: str = Query(..., min_length=1, description="회사명 일부 또는 종목코드"),
                      limit: int = Query(10, ge=1, le=50)):

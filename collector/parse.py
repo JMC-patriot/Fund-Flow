@@ -8,7 +8,7 @@ from dart import num, text, to_date, clean
 COLS = ["id", "corp_code", "sec_type", "source", "offering", "rcept_no", "rcept_dt", "name",
         "series", "board_date", "issue_date", "amount", "coupon", "ytm", "maturity_date",
         "conv_price", "refix_floor", "conv_start", "conv_end", "underlying", "shares",
-        "dilution_pct", "rating", "repaid", "repaid_asof", "method", "underwriter", "dkey", "raw"]
+        "dilution_pct", "rating", "grade", "repaid", "repaid_asof", "method", "underwriter", "dkey", "raw"]
 
 FDPP = ["fdpp_fclt", "fdpp_bsninh", "fdpp_op", "fdpp_dtrp", "fdpp_ocsa", "fdpp_etc"]
 
@@ -147,9 +147,31 @@ def periodic(r: dict) -> Optional[dict]:
         offering=offering_of(r.get("isu_mth_nm")), rcept_no=r.get("rcept_no"),
         rcept_dt=to_date((r.get("rcept_no") or "")[:8]), name=text(r.get("scrits_knd_nm")),
         issue_date=issue, amount=amount, coupon=num(r.get("intrt")), maturity_date=mtd,
-        rating=text(r.get("evl_grad_instt")), repaid=repaid_status(r.get("repy_at")),
+        rating=text(r.get("evl_grad_instt")), grade=grade_of(r.get("evl_grad_instt")),
+        repaid=repaid_status(r.get("repy_at")),
         repaid_asof=to_date(r.get("stlm_dt")), underwriter=text(r.get("mngt_cmpny")),
         dkey=f"P:{h}", raw={})          # 정기보고서 행은 원본 미저장 (단기사채 등 행이 많아 DB 용량 초과)
+
+
+_GRADE = re.compile(r"(?<![A-Z0-9])(AAA|AA[+-]?|A[1-3][+-]?|A[+-]?|BBB[+-]?|BB[+-]?|B[+-]?|CCC[+-]?|CC|C|D)(?![A-Z0-9+-])")
+
+
+_MOODY = {"Aaa": "AAA", "Aa1": "AA+", "Aa2": "AA", "Aa3": "AA-", "A1": "A+", "A2": "A", "A3": "A-",
+          "Baa1": "BBB+", "Baa2": "BBB", "Baa3": "BBB-", "Ba1": "BB+", "Ba2": "BB", "Ba3": "BB-",
+          "B1": "B+", "B2": "B", "B3": "B-"}
+
+
+def grade_of(rating) -> Optional[str]:
+    """신용등급 문구에서 등급만: 'AA-(한기평/한신평/NICE)' → 'AA-', 'A1 (한신평…)' → 'A1'"""
+    t = rating or ""
+    moody = None
+    if re.search(r"moody", t, re.I):
+        # 무디스 표기(Aaa·Aa1·A3·Baa2 …)는 국내 단기등급(A1~A3)과 헷갈리므로 떼어 두고, 다른 평가사 등급이 없을 때만 환산
+        mm = re.search(r"\b(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3])\b", t)
+        moody = _MOODY.get(mm.group(1)) if mm else None
+        t = re.sub(r"\b(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3])\b", " ", t)
+    m = _GRADE.search(t.upper().replace("０", "0"))
+    return m.group(1) if m else moody
 
 
 def repaid_status(v) -> Optional[str]:

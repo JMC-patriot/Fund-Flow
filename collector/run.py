@@ -380,7 +380,7 @@ where r.source = 'bond_rs' and r.sec_type in ('CB','BW','EB') and exists (
 
 -- 정기보고서 행과 공시 행이 같은 발행이면: 등급·상환 여부·금리를 공시 행에 옮기고 정기보고서 행은 숨김
 with m as (
-  select distinct on (p.id) p.id as pid, x.id as xid, p.rating, p.repaid, p.repaid_asof, p.coupon
+  select distinct on (p.id) p.id as pid, x.id as xid, p.rating, p.grade, p.repaid, p.repaid_asof, p.coupon
   from securities p join securities x
     on x.corp_code = p.corp_code and x.sec_type = p.sec_type and x.amount = p.amount
    and x.source <> 'periodic' and not x.superseded
@@ -388,7 +388,7 @@ with m as (
   where p.source = 'periodic'
   order by p.id, abs(x.issue_date - p.issue_date))
 , u as (
-  update securities x set rating = coalesce(m.rating, x.rating), repaid = m.repaid,
+  update securities x set rating = coalesce(m.rating, x.rating), grade = coalesce(m.grade, x.grade), repaid = m.repaid,
          repaid_asof = m.repaid_asof, coupon = coalesce(x.coupon, m.coupon)
   from m where x.id = m.xid returning m.pid)
 update securities set superseded = true where id in (select pid from u);

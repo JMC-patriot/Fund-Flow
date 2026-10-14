@@ -59,6 +59,7 @@ class Security(BaseModel):
     shares: Optional[float]
     dilution_pct: Optional[float]
     rating: Optional[str]
+    grade: Optional[str] = Field(None, description="정규화한 신용등급 (예: AA-, A1)")
     hybrid: bool = Field(False, description="신종자본증권 여부 (신종자본·영구·조건부자본 명칭이거나 만기 30년 이상)")
     repaid: Optional[str] = Field(description="상환 / 미상환 / 일부상환 (정기보고서 기준)")
     repaid_asof: Optional[date]
@@ -171,3 +172,41 @@ class StatementCompare(BaseModel):
     fs_div: str
     basis: str = Field(description="사용한 보고서")
     sections: list[CompareSection]
+
+
+class BenchMetric(BaseModel):
+    key: str
+    label: str
+    unit: str = Field(description="% / 년 / 원")
+    value: Optional[float] = Field(description="이 증권의 값")
+    n: int = Field(description="비교 가능한 표본 수")
+    p10: Optional[float] = None
+    p25: Optional[float] = None
+    p50: Optional[float] = None
+    p75: Optional[float] = None
+    p90: Optional[float] = None
+    percentile: Optional[float] = Field(None, description="이 증권 값의 표본 내 백분위 (0~100, 높을수록 값이 큼)")
+
+
+class BenchPeer(BaseModel):
+    id: str
+    corp_code: str
+    corp_name: str
+    issue_date: Optional[date]
+    amount: Optional[float]
+    grade: Optional[str]
+    tenor: Optional[float] = Field(description="만기(년)")
+    coupon: Optional[float]
+    ytm: Optional[float]
+    refix_ratio: Optional[float] = Field(description="리픽싱 하한 / 전환가 (%)")
+    dilution_pct: Optional[float]
+    method: Optional[str]
+
+
+class Benchmark(BaseModel):
+    id: str
+    sec_type: str
+    basis: str = Field(description="비교 대상 기준 설명")
+    n: int
+    metrics: list[BenchMetric]
+    peers: list[BenchPeer] = Field(description="발행일이 가까운 비교 대상 최대 15건")

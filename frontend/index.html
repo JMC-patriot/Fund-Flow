@@ -134,6 +134,19 @@ tr.soon:hover td{background:var(--sel)}
 .fs-tabs{margin:10px 0}
 .fs td.acc{text-align:left;white-space:normal;min-width:200px}
 
+.cmp{font-size:11.5px;border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:2px 7px;cursor:pointer;color:var(--accent)}
+.cmp:hover{border-color:var(--accent)}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
+.modal-bg.on{display:flex}
+.modal{background:var(--bg);border:1px solid var(--line);border-radius:14px;width:min(860px,100%);padding:20px 22px 24px}
+.bm-row{display:grid;grid-template-columns:150px 1fr 120px;gap:14px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.bm-bar{position:relative;height:30px}
+.bm-bar .rng{position:absolute;top:13px;height:4px;background:var(--track);border-radius:2px}
+.bm-bar .iqr{position:absolute;top:9px;height:12px;background:color-mix(in srgb,var(--accent) 30%,transparent);border-radius:3px}
+.bm-bar .med{position:absolute;top:5px;width:2px;height:20px;background:var(--text-2)}
+.bm-bar .me{position:absolute;top:3px;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}
+.bm-bar .lb{position:absolute;top:20px;font-size:10.5px;color:var(--muted);transform:translateX(-50%);white-space:nowrap}
+@media (max-width:700px){.bm-row{grid-template-columns:1fr}}
 .tip{position:fixed;pointer-events:none;background:var(--text);color:var(--surface);font-size:12px;
   padding:6px 9px;border-radius:6px;opacity:0;transition:opacity .1s;z-index:40;max-width:340px}
 .skel{color:var(--muted);padding:18px 0}
@@ -175,6 +188,7 @@ footer{border-top:1px solid var(--line);padding:18px 0 36px;font-size:12px;color
   <a id="api-docs" target="_blank" rel="noopener">API 문서</a><br>
   정기보고서 기반 항목(사모 회사채·CP·신용등급·상환 여부)은 보고서 제출 시점 기준이며, 투자 판단 전 공시 원문을 확인하세요.</div></footer>
 <div class="tip" id="tip"></div>
+<div class="modal-bg" id="modal"><div class="modal" id="modal-body"></div></div>
 
 <script>
 const API = (window.FUNDFLOW_API || "http://localhost:8000").replace(/\/$/, "");
@@ -417,8 +431,8 @@ function secTable(items, {corp = true} = {}) {
       <td class="l">${dt(s.issue_date)}</td><td class="amt">${eok(s.amount)}</td>
       <td>${pct(s.coupon)}</td><td>${pct(s.ytm)}</td><td>${s.conv_price ? n0(s.conv_price) : "–"}</td>
       <td class="hide-m">${s.refix_floor ? n0(s.refix_floor) : "–"}</td>
-      <td class="l wrap-txt" style="min-width:120px;max-width:190px">${esc(s.rating || "–")}</td><td class="l hide-m">${esc(s.repaid || "–")}</td>
-      <td>${s.dart_url ? `<a href="${esc(s.dart_url)}" target="_blank" rel="noopener">원문↗</a>` : ""}</td></tr>`;
+      <td class="l" title="${esc(s.rating || "")}">${s.grade ? `<b>${esc(s.grade)}</b>` : s.rating ? `<span class="na" style="font-size:12px">${esc(s.rating.slice(0, 14))}…</span>` : "–"}</td><td class="l hide-m">${esc(s.repaid || "–")}</td>
+      <td style="white-space:nowrap">${s.issue_date ? `<button class="cmp" data-bench="${esc(s.id)}" title="비슷한 증권과 발행조건 비교">비교</button> ` : ""}${s.dart_url ? `<a href="${esc(s.dart_url)}" target="_blank" rel="noopener">원문↗</a>` : ""}</td></tr>`;
   }).join("");
   return head + `<tbody>${rows || `<tr><td class="l na" colspan="15">조건에 맞는 증권이 없습니다</td></tr>`}</tbody>`;
 }
@@ -618,6 +632,59 @@ function renderFS(p, code, fins) {
   p.addEventListener("click", e => { const b = e.target.closest("[data-sj]"); if (b) { sj = b.dataset.sj; draw(); } });
   load();
 }
+
+/* ── 발행조건 벤치마크 ── */
+const bmFmt = (m, v) => v == null ? "–" : m.unit === "원" ? won(v) : m.unit === "년" ? (+v).toFixed(1) + "년" : (+v).toFixed(2) + "%";
+function bmBar(m) {
+  if (m.n < 3 || m.p10 == null) return '<span class="na">비교 표본 부족</span>';
+  const vals = [m.p10, m.p90, m.value].filter(v => v != null);
+  let lo = Math.min(...vals), hi = Math.max(...vals); if (hi === lo) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * .06, x = v => ((v - lo + pad) / (hi - lo + 2 * pad) * 100).toFixed(2) + "%";
+  return `<div class="bm-bar" data-tip="${esc(`P10 ${bmFmt(m, m.p10)} · P25 ${bmFmt(m, m.p25)} · 중앙 ${bmFmt(m, m.p50)} · P75 ${bmFmt(m, m.p75)} · P90 ${bmFmt(m, m.p90)}`)}">
+    <div class="rng" style="left:${x(m.p10)};width:calc(${x(m.p90)} - ${x(m.p10)})"></div>
+    <div class="iqr" style="left:${x(m.p25)};width:calc(${x(m.p75)} - ${x(m.p25)})"></div>
+    <div class="med" style="left:${x(m.p50)}"></div>
+    ${m.value != null ? `<div class="me" style="left:${x(m.value)}"></div>` : ""}
+    <span class="lb" style="left:${x(m.p50)}">중앙 ${bmFmt(m, m.p50)}</span></div>`;
+}
+function bmVerdict(m) {
+  if (m.percentile == null || m.n < 3) return "";
+  const p = m.percentile, hiTxt = {coupon: "높은 편", ytm: "높은 편", refix_ratio: "하한이 높은 편", tenor: "긴 편", amount: "큰 편", dilution_pct: "큰 편"}[m.key] || "높은 편";
+  const loTxt = {coupon: "낮은 편", ytm: "낮은 편", refix_ratio: "하한이 낮은 편", tenor: "짧은 편", amount: "작은 편", dilution_pct: "작은 편"}[m.key] || "낮은 편";
+  return p >= 75 ? `상위 ${Math.round(100 - p)}% · ${hiTxt}` : p <= 25 ? `하위 ${Math.round(p)}% · ${loTxt}` : "비슷한 수준";
+}
+async function openBench(id) {
+  const box = $("#modal-body"); $("#modal").classList.add("on");
+  box.innerHTML = '<p class="na">비교 대상을 찾는 중…</p>';
+  try {
+    const d = await get(`/api/securities/${encodeURIComponent(id)}/benchmark`);
+    const peerCols = d.sec_type === "EQUITY" || d.sec_type === "RCPS"
+      ? [["발행금액(억)", p => eok(p.amount)], ["희석률", p => pct(p.dilution_pct)], ["방식", p => esc(p.method || "–")]]
+      : d.sec_type === "SB" || d.sec_type === "CP" || d.sec_type === "STB"
+        ? [["등급", p => esc(p.grade || "–")], ["만기", p => p.tenor == null ? "–" : p.tenor.toFixed(1) + "년"], ["금리", p => pct(p.coupon)], ["발행금액(억)", p => eok(p.amount)]]
+        : [["표면", p => pct(p.coupon)], ["만기이자율", p => pct(p.ytm)], ["리픽싱 하한/전환가", p => p.refix_ratio == null ? "–" : p.refix_ratio.toFixed(0) + "%"], ["만기", p => p.tenor == null ? "–" : p.tenor.toFixed(1) + "년"], ["발행금액(억)", p => eok(p.amount)]];
+    box.innerHTML = `<div class="row between"><div><h2>발행조건 벤치마크</h2><p class="sub" style="margin-top:4px">비교 대상: ${esc(d.basis)} · <b>${n0(d.n)}건</b></p></div>
+        <button class="icon-btn" id="modal-x" aria-label="닫기">✕</button></div>
+      <div class="legend" style="margin-top:14px"><span><i style="background:var(--warn);border-radius:50%"></i>이 증권</span><span><i style="background:color-mix(in srgb,var(--accent) 30%,transparent)"></i>중간 50% (P25~P75)</span><span><i style="background:var(--track)"></i>P10~P90</span><span><i style="background:var(--text-2);width:2px"></i>중앙값</span></div>
+      ${d.metrics.map(m => `<div class="bm-row"><div><b>${esc(m.label)}</b><div class="na" style="font-size:12px">이 증권 ${bmFmt(m, m.value)}</div></div>
+        <div>${bmBar(m)}</div><div style="font-size:12.5px;text-align:right">${bmVerdict(m) || '<span class="na">–</span>'}<div class="na" style="font-size:11px">표본 ${n0(m.n)}건</div></div></div>`).join("")}
+      <h3 style="margin:20px 0 8px">발행일이 가까운 비교 대상</h3>
+      ${d.peers.length ? `<div class="tbl-wrap"><table><thead><tr><th class="l">회사</th><th class="l">발행일</th>${peerCols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>
+        ${d.peers.map(p => `<tr class="click" data-peer="${p.corp_code}"><td class="l nm">${esc(p.corp_name)}</td><td class="l">${dt(p.issue_date)}</td>${peerCols.map(c => `<td>${c[1](p)}</td>`).join("")}</tr>`).join("")}
+        </tbody></table></div>` : '<p class="na">비교 대상이 없습니다. 같은 조건의 발행이 이 기간에 없었어요.</p>'}
+      <p class="note">백분위는 이 증권 값이 비교 표본 안에서 차지하는 위치예요 (높을수록 값이 큼). 금융회사 발행분은 대상이 금융회사일 때만 비교에 넣습니다.</p>`;
+  } catch (e) { box.innerHTML = `<div class="row between"><h2>발행조건 벤치마크</h2><button class="icon-btn" id="modal-x">✕</button></div><p class="na">${esc(e.message)}</p>`; }
+}
+const closeBench = () => $("#modal").classList.remove("on");
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-bench]");
+  if (b) { e.stopPropagation(); e.preventDefault(); openBench(b.dataset.bench); return; }
+  if (e.target.id === "modal" || e.target.closest("#modal-x")) { closeBench(); return; }
+  const pr = e.target.closest("[data-peer]");
+  if (pr) { closeBench(); location.hash = "#/company/" + pr.dataset.peer; }
+}, true);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeBench(); });
+{ const b = new URLSearchParams(location.search).get("bench"); if (b) setTimeout(() => openBench(b), 300); }   // ?bench=증권ID 로 바로 열기
 
 /* ── CSV ── */
 function csv(name, rows) {

@@ -8,7 +8,7 @@ from dart import num, text, to_date, clean
 COLS = ["id", "corp_code", "sec_type", "source", "offering", "rcept_no", "rcept_dt", "name",
         "series", "board_date", "issue_date", "amount", "coupon", "ytm", "maturity_date",
         "conv_price", "refix_floor", "conv_start", "conv_end", "underlying", "shares",
-        "dilution_pct", "rating", "grade", "repaid", "repaid_asof", "method", "underwriter", "dkey", "raw"]
+        "dilution_pct", "rating", "grade", "repaid", "repaid_asof", "method", "underwriter", "issuer_name", "dkey", "raw"]
 
 FDPP = ["fdpp_fclt", "fdpp_bsninh", "fdpp_op", "fdpp_dtrp", "fdpp_ocsa", "fdpp_etc"]
 
@@ -147,6 +147,7 @@ def periodic(r: dict) -> Optional[dict]:
         offering=offering_of(r.get("isu_mth_nm")), rcept_no=r.get("rcept_no"),
         rcept_dt=to_date((r.get("rcept_no") or "")[:8]), name=text(r.get("scrits_knd_nm")),
         issue_date=issue, amount=amount, coupon=num(r.get("intrt")), maturity_date=mtd,
+        issuer_name=text(r.get("isu_cmpny")),           # 연결 자회사 발행분 구분용
         rating=text(r.get("evl_grad_instt")), grade=grade_of(r.get("evl_grad_instt")),
         repaid=repaid_status(r.get("repy_at")),
         repaid_asof=to_date(r.get("stlm_dt")), underwriter=text(r.get("mngt_cmpny")),

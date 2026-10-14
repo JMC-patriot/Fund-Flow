@@ -139,6 +139,10 @@ class Store:
                or excluded.repaid_asof >= securities.repaid_asof"""
         try:
             self.many(sql, rows)
+            # 발행회사명은 위 갱신 조건(최신 상환 기준일)과 무관하게 채움
+            names = [(r["issuer_name"], r["id"]) for r in rows if r.get("issuer_name")]
+            self.many("update securities set issuer_name = %s where id = %s and issuer_name is distinct from %s",
+                      [(n, i, n) for n, i in names])
         except psycopg.Error:
             # 이상한 행 하나 때문에 수집 전체가 멈추지 않도록: 한 행씩 넣고 실패한 행만 건너뜀
             for r in rows:
@@ -471,15 +475,25 @@ def save_fins(db, fins):
 
 
 # ── 6) 정정·중복 정리 ─────────────────────────────────────────────────
-DEDUPE_SQL = """
+DEDUPE_SQL = r"""
 -- 숨김(superseded) 최종값을 임시 테이블에서 계산하고, 실제로 바뀌는 행만 반영한다
 -- (전 행을 매번 다시 쓰면 무료 DB에서 낡은 행이 쌓여 용량 한도를 넘음)
 drop table if exists _sup;
 create temp table _sup as
-  select id, source, corp_code, dkey, rcept_no, sec_type, amount, method, rcept_dt, issue_date, maturity_date,
-         false as sup
-  from securities;
+  select s.id, s.source, s.corp_code, s.dkey, s.rcept_no, s.sec_type, s.amount, s.method, s.rcept_dt,
+         s.issue_date, s.maturity_date, s.issuer_name, c.corp_name, false as sup
+  from securities s join companies c using (corp_code);
 create index on _sup (corp_code);
+
+-- 정기보고서: 모회사 보고서에 실린 연결 자회사(현대캐피탈, 해외법인 등) 발행분은 숨김
+-- (자기 보고서를 내는 자회사는 그 보고서에서 따로 잡힘)
+update _sup set sup = true
+where source = 'periodic' and coalesce(issuer_name, '') not in ('', '-', '합계', '합 계')
+  and regexp_replace(issuer_name, '\(주\)|㈜|주식회사|\s', '', 'g') <> ''
+  and position(regexp_replace(issuer_name, '\(주\)|㈜|주식회사|\s', '', 'g')
+               in regexp_replace(corp_name, '\(주\)|㈜|주식회사|\s', '', 'g')) = 0
+  and position(regexp_replace(corp_name, '\(주\)|㈜|주식회사|\s', '', 'g')
+               in regexp_replace(issuer_name, '\(주\)|㈜|주식회사|\s', '', 'g')) = 0;
 
 -- 같은 출처·같은 키는 최신 접수본만
 update _sup s set sup = true
@@ -522,7 +536,7 @@ create temp table _m as
     on x.corp_code = p.corp_code and x.sec_type = p.sec_type and x.amount = p.amount
    and x.source <> 'periodic' and not x.sup
    and (abs(x.issue_date - p.issue_date) <= 10 or x.maturity_date = p.maturity_date)
-  where p.source = 'periodic'
+  where p.source = 'periodic' and not p.sup
   order by p.id, abs(x.issue_date - p.issue_date);
 
 update securities x set rating = coalesce(pp.rating, x.rating), grade = coalesce(pp.grade, x.grade),
@@ -557,6 +571,10 @@ def main():
     db = Store(env["DATABASE_URL"])
     since = date.fromisoformat(a.since)
     # 1회성 보정: 지분증권 신고서는 C001 목록으로 따로 훑고(빠름), 이미 받은 발행공시(C) 목록은 다시 훑지 않음
+    if not db.done("fix:issuer_v1"):                   # 정기보고서를 발행회사명과 함께 다시 받음
+        db.q("update filings set status='pending' where kind in ('ANNUAL','HALF','Q1','Q3') and status in ('done','skip')")
+        db.log("fix:issuer_v1")
+        print("발행회사명 보정: 정기보고서 발행실적을 다시 받습니다")
     if not db.done("fix:ipo_v3"):
         for s, e, final in list_windows(since):
             if final:

@@ -1,0 +1,17 @@
+# 무료 Render 서버가 15분 동안 요청이 없으면 잠들어 첫 접속이 30~60초 걸리므로, 10분마다 깨워 둠
+# (Render 무료 플랜은 한 달 750시간이라 서비스 하나를 계속 켜 둘 수 있음)
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping API
+        run: |
+          curl -s -m 90 -o /dev/null -w "health %{http_code} %{time_total}s\n" https://fundflow-api-kr3i.onrender.com/health || true
